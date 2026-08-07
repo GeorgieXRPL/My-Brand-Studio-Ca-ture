@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Secrets & local env
+.env
+.env.local
+.env.*.local
+hub/.env
+app/.env
+
+# Runtime data
+hub/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Build
+app/dist/
+app/dev-dist/
+.vercel
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db

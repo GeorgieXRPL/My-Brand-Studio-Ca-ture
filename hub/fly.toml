@@ -1,0 +1,27 @@
+# Fly.io config for the hosted Brand Studio hub.
+app = "brand-studio-hub"
+primary_region = "syd"
+
+[env]
+  PORT = "8787"
+  DB_PATH = "/data/hub.db"
+  ANTHROPIC_MODEL = "claude-sonnet-4-5"
+  ALLOWED_ORIGINS = "https://app-bay-nu-40.vercel.app,http://localhost:5173"
+  HUB_PUBLIC_URL = "https://brand-studio-hub.fly.dev"
+  APP_URL = "https://app-bay-nu-40.vercel.app"
+  APP_ORIGIN = "https://app-bay-nu-40.vercel.app"
+
+[mounts]
+  source = "hub_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

@@ -1,0 +1,24 @@
+{
+  "name": "brand-hub",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Always-on hub server (shared brain) for the Brand Building App and future OpenClaw agent.",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "dev": "node --env-file=.env --watch src/index.js",
+    "qr": "node --env-file=.env src/qr.js",
+    "set-tier": "node --env-file=.env src/set-tier.js"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "qrcode-terminal": "^0.12.0",
+    "stripe": "^17.7.0"
+  }
+}
