@@ -3,6 +3,7 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { ToastProvider } from "./lib/toast";
 import { useT } from "./lib/i18n";
 import { BulbIcon, CalendarIcon, GearIcon, MicIcon, PenIcon } from "./lib/icons";
+import PostReminderHost from "./lib/PostReminderHost";
 import Capture from "./screens/Capture";
 import Drafts from "./screens/Drafts";
 import Schedule from "./screens/Schedule";
@@ -10,6 +11,7 @@ import Workouts from "./screens/Workouts";
 import Setup from "./screens/Setup";
 import Agents from "./screens/Agents";
 import Insights from "./screens/Insights";
+import Legal from "./screens/Legal";
 
 const tabDefs = [
   { to: "/capture", key: "nav.capture" as const, icon: MicIcon, tour: "nav-capture" },
@@ -37,11 +39,14 @@ export default function App() {
           <Route path="/schedule" element={<Schedule />} />
           <Route path="/workouts" element={<Workouts />} />
           <Route path="/setup" element={<Setup />} />
+          <Route path="/terms" element={<Legal kind="terms" />} />
+          <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/insights" element={<Insights />} />
           <Route path="*" element={<Navigate to="/capture" replace />} />
         </Routes>
       </div>
+      <PostReminderHost />
       <nav className="nav">
         {tabDefs.map((tab) => (
           <NavLink

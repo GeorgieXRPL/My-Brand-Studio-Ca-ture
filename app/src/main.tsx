@@ -4,7 +4,8 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { LanguageProvider } from "./lib/i18n";
 import { initTextScale, initViewportZoom } from "./lib/viewportZoom";
-import "@fontsource-variable/inter";
+import "@fontsource-variable/syne";
+import "@fontsource-variable/dm-sans";
 import "./styles.css";
 
 initTextScale();

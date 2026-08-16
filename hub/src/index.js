@@ -5,15 +5,20 @@ import { writeFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { db, ensureOwnerUser, ensureRefCode, mediaDir } from "./db.js";
 import {
+  acceptTerms,
+  assertUserActive,
   createSession,
   destroySession,
   findOrCreateGoogleUser,
   getUser,
   login,
+  noteAuthEvent,
   resolveSession,
+  setUserDisabled,
   signup,
 } from "./auth.js";
-import { generateVariants, chat, PLATFORMS } from "./claude.js";
+import { findBlockedContent } from "./contentFilter.js";
+import { generateVariants, chat, PLATFORMS, resolveTextProvider, anthropicConfigured, grokTextConfigured } from "./textGen.js";
 import {
   connectUnified,
   finishXConnect,
@@ -26,23 +31,50 @@ import { generateTipsFor, getGrowthStatus, runWeeklyGrowthTips, tipsAreFresh } f
 import { agentAlgoBrief, algoKnowledgeAsOf } from "./algoContext.js";
 import {
   billingStatus,
+  consumeVideoCredit,
   createCheckoutSession,
+  createCreditsCheckoutSession,
   createPortalSession,
+  getVideoCredits,
+  refundVideoCredit,
   handleStripeWebhook,
 } from "./billing.js";
+import { DRAFT_LIMITS, STILL_LIMITS, VIDEO_LIMITS, PLAN_PRICES, VIDEO_CREDIT_PACKS } from "./plans.js";
 import {
   buildVideoPrompt,
   downloadBinary,
+  editStill,
   generateStill,
   imagineConfigured,
-  imagineMonthlyLimit,
   extractPostCaption,
   parseFilmLabels,
   pollVideo,
+  sanitizeImaginePrompt,
   startVideoGeneration,
+  STILL_EDIT_PRESETS,
 } from "./imagine.js";
+import { withBrandTag } from "./attribution.js";
+import {
+  burnTextOntoImage,
+  burnTextOntoVideo,
+  burnWatermarkOntoImage,
+  burnWatermarkOntoVideo,
+  muxNarrationOntoVideo,
+  normalizeOnScreen,
+  normalizeVideoForShare,
+} from "./overlay.js";
+import { safeParseVariants, sanitizeCopy, sanitizeVariants } from "./sanitize.js";
+import {
+  createCryptoInvoice,
+  cryptoPayConfig,
+  resolveCryptoMethod,
+  registerAdminRoutes,
+} from "./admin.js";
+import { syncCryptoDeposits } from "./cryptoWatch.js";
+import { getVoiceMeta, listTtsVoices, narrationFromLabels, synthesizeSpeech, ttsConfigured } from "./tts.js";
 
 const app = express();
+app.set("trust proxy", 1);
 
 const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
   .split(",")
@@ -73,6 +105,7 @@ app.post("/api/billing/webhook", express.raw({ type: "application/json" }), asyn
 });
 
 app.use(express.json({ limit: "1mb" }));
+registerAdminRoutes(app);
 
 const now = () => new Date().toISOString();
 const wrap = (fn) => (req, res) => {
@@ -104,17 +137,33 @@ function rateLimit(req, res, next) {
 
 // ---- Public routes ----
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, platforms: PLATFORMS }));
+app.get("/api/health", (_req, res) => {
+  try {
+    db.prepare("SELECT 1 AS ok").get();
+    res.json({
+      ok: true,
+      platforms: PLATFORMS,
+      db: true,
+      uptime_s: Math.round(process.uptime()),
+    });
+  } catch {
+    res.status(503).json({ ok: false, db: false, error: "Database unavailable" });
+  }
+});
 
 app.post("/api/auth/signup", rateLimit, wrap((req, res) => {
-  const user = signup(req.body?.email, req.body?.password, req.body?.ref);
+  const user = signup(req.body?.email, req.body?.password, req.body?.ref, {
+    termsAccepted: Boolean(req.body?.terms_accepted),
+  });
   const token = createSession(user.id);
+  noteAuthEvent({ userId: user.id, email: user.email, method: "password", isNew: true });
   res.status(201).json({ token, email: user.email });
 }));
 
 app.post("/api/auth/login", rateLimit, wrap((req, res) => {
   const user = login(req.body?.email, req.body?.password);
   const token = createSession(user.id);
+  noteAuthEvent({ userId: user.id, email: user.email, method: "password", isNew: false });
   res.json({ token, email: user.email });
 }));
 
@@ -132,9 +181,12 @@ const hubUrl = () => (process.env.HUB_PUBLIC_URL || "").replace(/\/$/, "");
 app.get("/api/auth/google/start", (req, res) => {
   if (!process.env.GOOGLE_CLIENT_ID) return res.status(501).json({ error: "Google sign-in isn't configured." });
   const state = randomBytes(24).toString("hex");
+  const meta = JSON.stringify({
+    ref: String(req.query.ref || "").trim().slice(0, 32),
+  });
   db.prepare(
-    "INSERT INTO oauth_states (state, user_id, platform, code_verifier, created_at) VALUES (?, 0, 'google', '', ?)"
-  ).run(state, now());
+    "INSERT INTO oauth_states (state, user_id, platform, code_verifier, created_at) VALUES (?, 0, 'google', ?, ?)"
+  ).run(state, meta, now());
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID,
     redirect_uri: `${hubUrl()}/api/auth/google/callback`,
@@ -152,6 +204,12 @@ app.get("/api/auth/google/callback", async (req, res) => {
     const pending = db.prepare("SELECT * FROM oauth_states WHERE state = ? AND platform = 'google'").get(state);
     if (!pending) throw new Error("Unknown or expired sign-in attempt.");
     db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
+    let refCode = "";
+    try {
+      refCode = JSON.parse(pending.code_verifier || "{}").ref || "";
+    } catch {
+      /* ignore */
+    }
 
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
@@ -178,8 +236,14 @@ app.get("/api/auth/google/callback", async (req, res) => {
       throw new Error("Google account has no verified email.");
     }
 
-    const user = findOrCreateGoogleUser(claims.email);
+    const user = findOrCreateGoogleUser(claims.email, { refCode });
     const session = createSession(user.id);
+    noteAuthEvent({
+      userId: user.id,
+      email: user.email,
+      method: "google",
+      isNew: Boolean(user.created),
+    });
     res.redirect(`${appUrl()}/setup#gtoken=${session}&gemail=${encodeURIComponent(user.email)}`);
   } catch (err) {
     console.error(err);
@@ -293,6 +357,11 @@ app.use((req, res, next) => {
       hits.count++;
     }
 
+    try {
+      assertUserActive(key.user_id);
+    } catch (e) {
+      return res.status(e.status || 403).json({ error: e.message });
+    }
     db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), key.id);
     db.prepare(
       "INSERT INTO agent_events (api_key_id, user_id, method, route, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -304,6 +373,11 @@ app.use((req, res, next) => {
   }
   const userId = resolveSession(token);
   if (!userId) return res.status(401).json({ error: "Session expired. Sign in again." });
+  try {
+    assertUserActive(userId);
+  } catch (e) {
+    return res.status(e.status || 403).json({ error: e.message });
+  }
   req.userId = userId;
   req.tokenKind = "session";
   next();
@@ -313,21 +387,85 @@ app.use((req, res, next) => {
 // Stripe webhooks update users.tier; CLI set-tier remains for ops.
 // Self-host owner (id 1 / owner@selfhost.local) is set to Studio in ensureOwnerUser.
 
-const TIER_LIMITS = { free: 10, creator: 200, studio: 1000 }; // drafts per month
-
 function getTier(userId) {
   const row = db.prepare("SELECT tier FROM users WHERE id = ?").get(userId);
-  return TIER_LIMITS[row?.tier] !== undefined ? row.tier : "free";
+  return DRAFT_LIMITS[row?.tier] !== undefined ? row.tier : "free";
+}
+
+/** Lock capture/source media once so Imagine still/edit/video can be reverted. */
+function lockOriginalMedia(draft) {
+  if (!draft?.id || draft.original_media_url || !draft.media_url) return;
+  // If Imagine already ran and we never stored a source, don't treat the AI result as original.
+  const imagined = db.prepare("SELECT 1 AS n FROM imagine_jobs WHERE draft_id = ? LIMIT 1").get(draft.id);
+  if (imagined) return;
+  db.prepare(
+    "UPDATE drafts SET original_media_url = ? WHERE id = ? AND user_id = ? AND (original_media_url IS NULL OR original_media_url = '')"
+  ).run(draft.media_url, draft.id, draft.user_id);
+}
+
+/** Replace draft media, preserving the first non-AI attachment as original. */
+function replaceDraftMedia(draft, newUrl) {
+  lockOriginalMedia(draft);
+  db.prepare("UPDATE drafts SET media_url = ? WHERE id = ? AND user_id = ?").run(newUrl, draft.id, draft.user_id);
+}
+
+function monthStartIso() {
+  return now().slice(0, 7) + "-01";
 }
 
 function draftUsage(userId) {
-  const monthStart = now().slice(0, 7) + "-01";
   const used = db
     .prepare("SELECT COUNT(*) AS n FROM drafts WHERE user_id = ? AND created_at >= ?")
-    .get(userId, monthStart).n;
+    .get(userId, monthStartIso()).n;
   const bonus = db.prepare("SELECT bonus_drafts FROM users WHERE id = ?").get(userId)?.bonus_drafts || 0;
   const tier = getTier(userId);
-  return { tier, used, limit: TIER_LIMITS[tier] + bonus };
+  return { tier, used, limit: DRAFT_LIMITS[tier] + bonus };
+}
+
+function mediaKindUsage(userId, kind) {
+  // Failed jobs do not consume monthly included quota (hub/xAI errors shouldn't punish users).
+  // Pending still counts so concurrent starts can't pile up free attempts.
+  return db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM imagine_jobs
+       WHERE user_id = ? AND kind = ? AND status IN ('done', 'pending') AND created_at >= ?`
+    )
+    .get(userId, kind, monthStartIso()).n;
+}
+
+/** Stills + edits share the Creator monthly still allowance. */
+function stillUsage(userId) {
+  const tier = getTier(userId);
+  const used = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM imagine_jobs
+       WHERE user_id = ? AND kind IN ('still', 'edit') AND status IN ('done', 'pending') AND created_at >= ?`
+    )
+    .get(userId, monthStartIso()).n;
+  const limit = STILL_LIMITS[tier] ?? 0;
+  return { tier, used, limit, remaining: Math.max(0, limit - used) };
+}
+
+/**
+ * Videos: Studio monthly included, then purchased video_credits.
+ * Failed generations are excluded so OOM / xAI errors don't burn the allowance.
+ */
+function videoUsage(userId) {
+  const tier = getTier(userId);
+  const used = mediaKindUsage(userId, "video");
+  const included = VIDEO_LIMITS[tier] ?? 0;
+  const credits = getVideoCredits(userId);
+  const includedRemaining = Math.max(0, included - used);
+  const remaining = includedRemaining + credits;
+  return {
+    tier,
+    used,
+    included,
+    included_remaining: includedRemaining,
+    credits,
+    remaining,
+    limit: included,
+  };
 }
 
 function assertDraftQuota(userId, res) {
@@ -336,7 +474,7 @@ function assertDraftQuota(userId, res) {
     res.status(429).json({
       error:
         usage.tier === "free"
-          ? `You've used all ${usage.limit} free drafts this month. Upgrade to Creator for 200/month - or invite a friend for bonus drafts.`
+          ? `You've used all ${usage.limit} free drafts this month. Upgrade to Creator for ${DRAFT_LIMITS.creator}/month — or invite a friend for bonus drafts.`
           : `Monthly draft limit reached (${usage.limit}). It resets on the 1st.`,
       upgrade: usage.tier === "free" ? "creator" : undefined,
     });
@@ -352,8 +490,8 @@ function requireTier(req, res, minTier) {
   res.status(402).json({
     error:
       minTier === "studio"
-        ? "This is a Studio feature. Upgrade for AI clips, agents, and self-hosted hub. Until then, use guided Share from Drafts."
-        : "This is a Creator feature. Upgrade for more drafts, the content queue, and growth tips.",
+        ? "AI video clips are a Studio feature. Upgrade for video, agents, and self-hosted hub — or buy clip credits on Setup."
+        : "This is a Creator feature. Upgrade for more drafts, AI stills, and growth tips.",
     upgrade: minTier,
   });
   return false;
@@ -372,6 +510,8 @@ app.get("/api/billing/plans", wrap((_req, res) => {
 app.get("/api/auth/me", wrap((req, res) => {
   const user = getUser(req.userId);
   const usage = draftUsage(req.userId);
+  const stills = stillUsage(req.userId);
+  const videos = videoUsage(req.userId);
   const referrals = db.prepare("SELECT COUNT(*) AS n FROM users WHERE referred_by = ?").get(req.userId).n;
   const billing = billingStatus();
   res.json({
@@ -382,9 +522,22 @@ app.get("/api/auth/me", wrap((req, res) => {
     referrals,
     drafts_used: usage.used,
     drafts_limit: usage.limit,
+    stills_used: stills.used,
+    stills_limit: stills.limit,
+    videos_used: videos.used,
+    videos_included: videos.included,
+    video_credits: videos.credits,
+    videos_remaining: videos.remaining,
     billing_configured: billing.configured,
+    credits_checkout: billing.credits_checkout,
     has_stripe_customer: Boolean(user?.stripe_customer_id),
+    terms_accepted_at: user?.terms_accepted_at || null,
   });
+}));
+
+app.post("/api/auth/accept-terms", wrap((req, res) => {
+  acceptTerms(req.userId);
+  res.json({ ok: true, terms_accepted_at: getUser(req.userId)?.terms_accepted_at || null });
 }));
 
 app.post("/api/auth/logout", wrap((req, res) => {
@@ -410,6 +563,22 @@ app.post("/api/billing/checkout", wrap(async (req, res) => {
   }
 }));
 
+app.post("/api/billing/credits/checkout", wrap(async (req, res) => {
+  if (req.tokenKind === "agent") return res.status(403).json({ error: "Agents can't manage billing." });
+  try {
+    const user = getUser(req.userId);
+    const result = await createCreditsCheckoutSession({
+      userId: req.userId,
+      email: user?.email,
+      pack: req.body?.pack,
+      req,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+}));
+
 app.post("/api/billing/portal", wrap(async (req, res) => {
   if (req.tokenKind === "agent") return res.status(403).json({ error: "Agents can't manage billing." });
   try {
@@ -420,19 +589,136 @@ app.post("/api/billing/portal", wrap(async (req, res) => {
   }
 }));
 
+app.get("/api/billing/crypto", wrap((req, res) => {
+  res.json(cryptoPayConfig());
+}));
+
+app.post("/api/billing/crypto/invoice", wrap((req, res) => {
+  if (req.tokenKind === "agent") return res.status(403).json({ error: "Agents can't manage billing." });
+  const cfg = cryptoPayConfig();
+  if (!cfg.enabled) {
+    return res.status(503).json({ error: "Crypto payments are not enabled on this hub yet." });
+  }
+  const method = resolveCryptoMethod(req.body?.method || req.body?.asset);
+  if (!method) {
+    return res.status(503).json({ error: "No deposit addresses configured yet." });
+  }
+  const product = String(req.body?.product || "").trim();
+  let amountUsd = 0;
+  if (product === "creator") amountUsd = PLAN_PRICES.creator.monthly;
+  else if (product === "studio") amountUsd = PLAN_PRICES.studio.monthly;
+  else if (product.startsWith("credits_")) {
+    const pack = product.replace("credits_", "");
+    amountUsd = VIDEO_CREDIT_PACKS[pack]?.usd || 0;
+  }
+  if (!amountUsd) return res.status(400).json({ error: "Unknown product. Use creator, studio, or credits_5/15/40." });
+  const user = getUser(req.userId);
+  // Internal reference only — not shown to the payer (no memo required on-chain).
+  const memo = `BS-${req.userId}-${Date.now().toString(36).slice(-6)}`.toUpperCase();
+  const inv = createCryptoInvoice({
+    userId: req.userId,
+    email: user?.email || "",
+    product,
+    amountUsd,
+    chain: method.chain,
+    asset: method.asset,
+    methodId: method.id,
+    payTo: method.pay_to,
+    memo,
+    expectedRaw:
+      method.asset === "USDC" || method.asset === "USDT"
+        ? String(Math.round(amountUsd * 1e6))
+        : null,
+  });
+  res.status(201).json({
+    invoice: { id: inv.id, product: inv.product, amount_usd: amountUsd },
+    method: method.id,
+    pay_to: method.pay_to,
+    chain: method.chain,
+    asset: method.asset,
+    label: method.label,
+    token: method.token || null,
+    note: cfg.note,
+    amount_usd: amountUsd,
+    auto_confirm: cfg.auto_confirm,
+  });
+}));
+
+app.get("/api/imagine/voices", wrap((_req, res) => {
+  res.json(listTtsVoices());
+}));
+
+/** Short sample so creators can hear a voice style before generating. */
+app.post("/api/imagine/voices/preview", async (req, res) => {
+  try {
+    if (!requireTier(req, res, "studio")) return;
+    if (!ttsConfigured()) {
+      return res.status(503).json({ error: "Voice styles need XAI_API_KEY on the hub." });
+    }
+    const voiceId = String(req.body?.voice_id || "").trim().toLowerCase();
+    const meta = getVoiceMeta(voiceId);
+    if (!meta) {
+      return res.status(400).json({ error: "Pick a voice style (eve, ara, rex, sal, or leo)." });
+    }
+    const text =
+      String(req.body?.text || "").trim().slice(0, 220) ||
+      meta.example ||
+      `Hi — this is ${meta.label}, ${meta.vibe.toLowerCase()}.`;
+    const { buf, mime } = await synthesizeSpeech(text, meta.id);
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.send(buf);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status && err.status < 600 ? err.status : 500).json({
+      error: err.message || "Couldn't preview voice",
+    });
+  }
+});
+
 // ---- Profile (goals, projects, brand voice) ----
 
 function readProfile(userId) {
   const row = db
-    .prepare("SELECT goals, projects, brand_voice, traits FROM profiles WHERE user_id = ?")
-    .get(userId) || { goals: "", projects: "", brand_voice: "", traits: "{}" };
+    .prepare("SELECT goals, projects, brand_voice, traits, watermark_media_url FROM profiles WHERE user_id = ?")
+    .get(userId) || { goals: "", projects: "", brand_voice: "", traits: "{}", watermark_media_url: null };
   let traits = {};
   try {
     traits = JSON.parse(row.traits || "{}");
   } catch {
     /* corrupted traits fall back to empty */
   }
-  return { goals: row.goals, projects: row.projects, brand_voice: row.brand_voice, traits };
+  return {
+    goals: row.goals,
+    projects: row.projects,
+    brand_voice: row.brand_voice,
+    traits,
+    watermark_media_url: row.watermark_media_url || null,
+  };
+}
+
+/** Resolve a user's watermark image bytes from a /media/{id} URL they own. */
+function loadWatermarkBuffer(userId, url) {
+  if (!url) return null;
+  const id = String(url).split("/").pop()?.split("?")[0];
+  if (!id) return null;
+  const row = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(id, userId);
+  if (!row?.mime?.startsWith("image/")) return null;
+  const file = join(mediaDir, row.id);
+  if (!existsSync(file)) return null;
+  try {
+    return readFileSync(file);
+  } catch {
+    return null;
+  }
+}
+
+function resolveWatermarkUrl(userId, requested) {
+  const profileUrl = readProfile(userId).watermark_media_url;
+  const url = requested === undefined || requested === null ? profileUrl : requested;
+  if (!url) return null;
+  // Must belong to this user.
+  return loadWatermarkBuffer(userId, url) ? url : null;
 }
 
 app.get("/api/profile", wrap((req, res) => {
@@ -440,12 +726,31 @@ app.get("/api/profile", wrap((req, res) => {
 }));
 
 app.put("/api/profile", wrap((req, res) => {
-  const { goals = "", projects = "", brand_voice = "", traits = {} } = req.body || {};
+  const {
+    goals = "",
+    projects = "",
+    brand_voice = "",
+    traits = {},
+    watermark_media_url = undefined,
+  } = req.body || {};
+  const existing = readProfile(req.userId);
+  let nextWm = existing.watermark_media_url;
+  if (watermark_media_url !== undefined) {
+    if (!watermark_media_url) {
+      nextWm = null;
+    } else if (loadWatermarkBuffer(req.userId, watermark_media_url)) {
+      nextWm = watermark_media_url;
+    } else {
+      return res.status(400).json({ error: "Watermark must be an image you uploaded to this hub." });
+    }
+  }
   db.prepare(
-    `INSERT INTO profiles (user_id, goals, projects, brand_voice, traits, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO profiles (user_id, goals, projects, brand_voice, traits, watermark_media_url, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (user_id) DO UPDATE SET goals = excluded.goals, projects = excluded.projects,
-       brand_voice = excluded.brand_voice, traits = excluded.traits, updated_at = excluded.updated_at`
-  ).run(req.userId, goals, projects, brand_voice, JSON.stringify(traits || {}), now());
+       brand_voice = excluded.brand_voice, traits = excluded.traits,
+       watermark_media_url = excluded.watermark_media_url, updated_at = excluded.updated_at`
+  ).run(req.userId, goals, projects, brand_voice, JSON.stringify(traits || {}), nextWm, now());
   res.json(readProfile(req.userId));
 }));
 
@@ -483,9 +788,26 @@ app.delete("/api/ideas/:id", wrap((req, res) => {
 
 // ---- Drafts ----
 
+function mediaMimeForUrl(url) {
+  if (!url) return null;
+  const id = String(url).split("/").pop()?.split("?")[0];
+  if (!id) return null;
+  return db.prepare("SELECT mime FROM media WHERE id = ?").get(id)?.mime || null;
+}
+
+function draftJson(row) {
+  if (!row) return row;
+  return {
+    ...row,
+    variants: safeParseVariants(row.variants),
+    media_mime: mediaMimeForUrl(row.media_url),
+    original_media_mime: mediaMimeForUrl(row.original_media_url),
+  };
+}
+
 app.get("/api/drafts", wrap((req, res) => {
   const rows = db.prepare("SELECT * FROM drafts WHERE user_id = ? ORDER BY created_at DESC").all(req.userId);
-  res.json(rows.map((r) => ({ ...r, variants: JSON.parse(r.variants) })));
+  res.json(rows.map(draftJson));
 }));
 
 app.post("/api/drafts", wrap((req, res) => {
@@ -498,11 +820,22 @@ app.post("/api/drafts", wrap((req, res) => {
   if (!topic || !variants) return res.status(400).json({ error: "topic and variants are required" });
   const info = db
     .prepare(
-      "INSERT INTO drafts (user_id, idea_id, topic, variants, status, source, media_url, agent_key_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO drafts (user_id, idea_id, topic, variants, status, source, media_url, original_media_url, agent_key_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(req.userId, idea_id, topic, JSON.stringify(variants), status, source, media_url, req.agentKeyId || null, now());
+    .run(
+      req.userId,
+      idea_id,
+      topic,
+      JSON.stringify(sanitizeVariants(variants)),
+      status,
+      source,
+      media_url,
+      media_url || null,
+      req.agentKeyId || null,
+      now()
+    );
   const row = db.prepare("SELECT * FROM drafts WHERE id = ?").get(info.lastInsertRowid);
-  res.status(201).json({ ...row, variants: JSON.parse(row.variants) });
+  res.status(201).json(draftJson(row));
 }));
 
 app.patch("/api/drafts/:id", wrap((req, res) => {
@@ -513,15 +846,43 @@ app.patch("/api/drafts/:id", wrap((req, res) => {
   if (req.tokenKind === "agent" && status && status !== "draft") {
     return res.status(403).json({ error: "Agents can't approve drafts. The user approves in the app." });
   }
-  db.prepare("UPDATE drafts SET status = ?, variants = ?, topic = ?, media_url = ? WHERE id = ?").run(
+  let nextMedia = media_url !== undefined ? media_url : existing.media_url;
+  let nextOriginal = existing.original_media_url;
+  if (media_url !== undefined && media_url && !existing.original_media_url) {
+    // First attachment (or recovery): treat it as the restore point.
+    nextOriginal = media_url;
+  }
+  db.prepare(
+    "UPDATE drafts SET status = ?, variants = ?, topic = ?, media_url = ?, original_media_url = ? WHERE id = ?"
+  ).run(
     status ?? existing.status,
-    variants ? JSON.stringify(variants) : existing.variants,
+    variants ? JSON.stringify(sanitizeVariants(variants)) : existing.variants,
     topic ?? existing.topic,
-    media_url !== undefined ? media_url : existing.media_url,
+    nextMedia,
+    nextOriginal,
     existing.id
   );
   const row = db.prepare("SELECT * FROM drafts WHERE id = ?").get(existing.id);
-  res.json({ ...row, variants: JSON.parse(row.variants) });
+  res.json(draftJson(row));
+}));
+
+/** Restore draft media to the pre-Imagine capture/attachment. */
+app.post("/api/drafts/:id/revert-media", wrap((req, res) => {
+  const existing = db.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").get(req.params.id, req.userId);
+  if (!existing) return res.status(404).json({ error: "Not found" });
+  if (!existing.original_media_url) {
+    return res.status(400).json({ error: "No original media to restore on this draft." });
+  }
+  if (existing.media_url === existing.original_media_url) {
+    return res.json(draftJson(existing));
+  }
+  db.prepare("UPDATE drafts SET media_url = ? WHERE id = ? AND user_id = ?").run(
+    existing.original_media_url,
+    existing.id,
+    req.userId
+  );
+  const row = db.prepare("SELECT * FROM drafts WHERE id = ?").get(existing.id);
+  res.json(draftJson(row));
 }));
 
 app.delete("/api/drafts/:id", wrap((req, res) => {
@@ -529,10 +890,23 @@ app.delete("/api/drafts/:id", wrap((req, res) => {
   res.json({ ok: true });
 }));
 
-// ---- Generate (Claude): one idea -> 5 platform variants, saved as a draft ----
+// ---- Generate: one idea -> platform variants, saved as a draft ----
+
+const generateHits = new Map();
+let generateInflight = 0;
+const MAX_GENERATE_INFLIGHT = Math.max(4, Number(process.env.GENERATE_MAX_INFLIGHT || 16));
 
 app.post("/api/generate", async (req, res) => {
   try {
+    const wait = hitLimit(generateHits, req.userId, 12, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `Draft rate limit — try again in ${wait}s.` });
+    }
+    if (generateInflight >= MAX_GENERATE_INFLIGHT) {
+      return res.status(429).json({
+        error: "Lots of people are drafting right now — wait a few seconds and tap Draft now again.",
+      });
+    }
     if (!assertDraftQuota(req.userId, res)) return;
 
     const ideaId = req.body?.idea_id ?? null;
@@ -546,8 +920,10 @@ app.post("/api/generate", async (req, res) => {
       }
     }
     if (!topic) return res.status(400).json({ error: "topic or idea_id is required" });
+    const blocked = findBlockedContent(topic);
+    if (blocked) return res.status(400).json({ error: blocked });
 
-    // If media is attached, hand images to Claude's vision so posts reflect
+    // If media is attached, hand images to vision so posts reflect
     // what's actually in the picture. (Videos can't be watched by the model.)
     let image = null;
     let isVideo = false;
@@ -565,18 +941,41 @@ app.post("/api/generate", async (req, res) => {
     }
 
     const profile = readProfile(req.userId);
-    const variants = await generateVariants({ topic, profile, image, isVideo });
+    const providerPref = req.body?.text_provider || profile?.traits?.text_provider;
+    generateInflight++;
+    let variants;
+    try {
+      variants = await generateVariants({
+        topic,
+        profile,
+        image,
+        isVideo,
+        provider: providerPref,
+      });
+    } finally {
+      generateInflight--;
+    }
 
     const source = req.tokenKind === "agent" ? "agent" : "user";
     const info = db
       .prepare(
-        "INSERT INTO drafts (user_id, idea_id, topic, variants, status, source, media_url, agent_key_id, created_at) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)"
+        "INSERT INTO drafts (user_id, idea_id, topic, variants, status, source, media_url, original_media_url, agent_key_id, created_at) VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)"
       )
-      .run(req.userId, ideaId, topic, JSON.stringify(variants), source, mediaUrl, req.agentKeyId || null, now());
+      .run(
+        req.userId,
+        ideaId,
+        topic,
+        JSON.stringify(sanitizeVariants(variants)),
+        source,
+        mediaUrl,
+        mediaUrl || null,
+        req.agentKeyId || null,
+        now()
+      );
     if (ideaId) db.prepare("UPDATE ideas SET status = 'drafted' WHERE id = ? AND user_id = ?").run(ideaId, req.userId);
 
     const row = db.prepare("SELECT * FROM drafts WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json({ ...row, variants: JSON.parse(row.variants) });
+    res.status(201).json(draftJson(row));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || "Generation failed" });
@@ -590,7 +989,7 @@ app.post("/api/chat", async (req, res) => {
     const message = (req.body?.message || "").trim();
     if (!message) return res.status(400).json({ error: "message is required" });
     const reply = await chat({ message, profile: readProfile(req.userId) });
-    res.json({ reply });
+    res.json({ reply: sanitizeCopy(reply) });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message || "Chat failed" });
@@ -744,10 +1143,10 @@ app.post("/api/posts", async (req, res) => {
     if (!requirePublishTier(req, res, platform)) return;
     const draft = db.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").get(draft_id, req.userId);
     if (!draft) return res.status(404).json({ error: "Draft not found" });
-    const variants = JSON.parse(draft.variants);
+    const variants = safeParseVariants(draft.variants);
     const raw = (variants[platform] || "").trim();
     if (!raw) return res.status(400).json({ error: `This draft has no ${platform} version.` });
-    const text = extractPostCaption(raw, platform);
+    const text = withBrandTag(extractPostCaption(raw, platform), getTier(req.userId));
 
     const { externalId } = await publish({ userId: req.userId, platform, text });
     const info = db
@@ -774,7 +1173,7 @@ app.post("/api/posts/schedule", wrap((req, res) => {
   if (Number.isNaN(when.getTime()) || when.getTime() < Date.now() - 60_000) {
     return res.status(400).json({ error: "scheduled_at must be a valid future time" });
   }
-  const variants = JSON.parse(draft.variants);
+  const variants = safeParseVariants(draft.variants);
   if (!(variants[platform] || "").trim()) {
     return res.status(400).json({ error: `This draft has no ${platform} version.` });
   }
@@ -813,7 +1212,7 @@ app.get("/api/posts/scheduled", wrap((req, res) => {
     rows.map((row) => {
       let preview = "";
       try {
-        const variants = JSON.parse(row.draft_variants || "{}");
+        const variants = safeParseVariants(row.draft_variants);
         preview = extractPostCaption(String(variants[row.platform] || "").trim(), row.platform);
       } catch {
         preview = "";
@@ -888,13 +1287,87 @@ const MEDIA_TYPES = {
   "video/3gpp": true, // older Android camcorders
 };
 
+/** Per-user rate limits for upload / Imagine (abuse protection). */
+const mediaHits = new Map();
+const imagineHits = new Map();
+function hitLimit(map, key, limit, windowMs) {
+  const nowMs = Date.now();
+  const entry = map.get(key);
+  if (!entry || entry.resetAt < nowMs) {
+    map.set(key, { count: 1, resetAt: nowMs + windowMs });
+    return null;
+  }
+  if (entry.count >= limit) {
+    return Math.ceil((entry.resetAt - nowMs) / 1000);
+  }
+  entry.count++;
+  return null;
+}
+
+function pendingImagineCount() {
+  return db.prepare("SELECT COUNT(*) AS n FROM imagine_jobs WHERE status = 'pending'").get()?.n || 0;
+}
+
+function imagineQueueFull() {
+  const max = Math.max(1, Number(process.env.IMAGINE_MAX_INFLIGHT || 6));
+  return pendingImagineCount() >= max;
+}
+
+/** Magic-byte sniff so Content-Type alone can't smuggle executables. */
+function sniffMediaKind(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image";
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image";
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image";
+  if (
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50
+  ) {
+    return "image";
+  }
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return "video";
+  // ISO BMFF (mp4 / mov / heic): ....ftyp
+  if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+    const brand = buf.slice(8, 12).toString("ascii").toLowerCase();
+    if (brand.includes("heic") || brand.includes("heif") || brand.includes("mif1") || brand.includes("msf1")) {
+      return "image";
+    }
+    return "video";
+  }
+  // Reject PE / ELF / Mach-O / scripts that sometimes arrive as "video/mp4"
+  if (buf[0] === 0x4d && buf[1] === 0x5a) return "reject"; // MZ
+  if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) return "reject"; // ELF
+  if (buf[0] === 0x23 && buf[1] === 0x21) return "reject"; // #!
+  return null;
+}
+
 app.post(
   "/api/media",
   express.raw({ type: () => true, limit: "25mb" }),
   wrap((req, res) => {
+    const wait = hitLimit(mediaHits, req.userId, 40, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `Upload rate limit — try again in ${wait}s.` });
+    }
     const mime = (req.get("content-type") || "").split(";")[0].trim();
     if (!MEDIA_TYPES[mime]) return res.status(415).json({ error: `Unsupported media type: ${mime}` });
     if (!req.body?.length) return res.status(400).json({ error: "Empty upload" });
+    const kind = sniffMediaKind(req.body);
+    if (kind === "reject" || !kind) {
+      return res.status(415).json({ error: "File doesn't look like an image or video." });
+    }
+    if (kind === "image" && !mime.startsWith("image/")) {
+      return res.status(415).json({ error: "Content-Type must match image upload." });
+    }
+    if (kind === "video" && !mime.startsWith("video/")) {
+      return res.status(415).json({ error: "Content-Type must match video upload." });
+    }
     const id = randomBytes(16).toString("hex");
     writeFileSync(join(mediaDir, id), req.body);
     db.prepare("INSERT INTO media (id, user_id, mime, size, created_at) VALUES (?, ?, ?, ?, ?)").run(
@@ -912,13 +1385,15 @@ app.post(
 // ---- Grok Imagine (Studio): AI clip / still for drafts ----
 
 function imagineUsage(userId) {
-  const monthStart = now().slice(0, 7) + "-01";
-  const used = db
-    .prepare(
-      "SELECT COUNT(*) AS n FROM imagine_jobs WHERE user_id = ? AND created_at >= ? AND status != 'failed'"
-    )
-    .get(userId, monthStart).n;
-  return { used, limit: imagineMonthlyLimit(), configured: imagineConfigured() };
+  const stills = stillUsage(userId);
+  const videos = videoUsage(userId);
+  return {
+    configured: imagineConfigured(),
+    used: videos.used,
+    limit: videos.included,
+    stills,
+    videos,
+  };
 }
 
 function publicMediaUrl(mediaId) {
@@ -939,6 +1414,19 @@ function saveDownloadedMedia(userId, buf, mime) {
   return { id, url: publicMediaUrl(id), mime };
 }
 
+/** Mark a job failed and refund a purchased credit if one was charged. */
+function failImagineJob(job, error, { progress = 100 } = {}) {
+  if (!job?.id) return;
+  const ts = now();
+  db.prepare(
+    "UPDATE imagine_jobs SET status = 'failed', error = ?, progress = ?, updated_at = ? WHERE id = ? AND status = 'pending'"
+  ).run(String(error || "Generation failed").slice(0, 400), progress, ts, job.id);
+  if (job.credit_charged) {
+    refundVideoCredit(job.user_id);
+    db.prepare("UPDATE imagine_jobs SET credit_charged = 0 WHERE id = ?").run(job.id);
+  }
+}
+
 async function syncImagineJob(job) {
   if (!job || job.status !== "pending" || !job.xai_request_id) return job;
   try {
@@ -952,25 +1440,101 @@ async function syncImagineJob(job) {
       );
     } else if (poll.status === "done" && poll.url) {
       if (poll.respectModeration === false) {
-        db.prepare(
-          "UPDATE imagine_jobs SET status = 'failed', error = ?, progress = 100, updated_at = ? WHERE id = ?"
-        ).run("Generated clip did not pass moderation.", ts, job.id);
+        failImagineJob(job, "Generated clip did not pass moderation.");
       } else {
-        const { buf, mime } = await downloadBinary(poll.url);
-        const saved = saveDownloadedMedia(job.user_id, buf, mime.startsWith("video/") ? mime : "video/mp4");
+        let { buf, mime } = await downloadBinary(poll.url);
+        mime = mime.startsWith("video/") ? mime : "video/mp4";
+        // Cap in-memory processing — huge buffers OOMed the Fly VM.
+        if (buf.length > 40 * 1024 * 1024) {
+          failImagineJob(job, "Generated clip was too large to process. Try again without extra overlays.");
+          return db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
+        }
+
+        // Save the raw clip while still pending so a hung overlay/TTS doesn't lose the xAI result.
+        // Do NOT mark done yet — clients would load the URL, then it can swap after voice/overlay.
+        let saved = saveDownloadedMedia(job.user_id, buf, mime);
         db.prepare(
-          "UPDATE imagine_jobs SET status = 'done', progress = 100, media_url = ?, error = NULL, updated_at = ? WHERE id = ?"
+          "UPDATE imagine_jobs SET progress = 96, media_url = ?, error = NULL, updated_at = ? WHERE id = ?"
         ).run(saved.url, ts, job.id);
-        db.prepare("UPDATE drafts SET media_url = ? WHERE id = ? AND user_id = ?").run(
-          saved.url,
-          job.draft_id,
-          job.user_id
-        );
+        const draftRow = db
+          .prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?")
+          .get(job.draft_id, job.user_id);
+        if (draftRow) replaceDraftMedia(draftRow, saved.url);
+
+        const overlayText = normalizeOnScreen(job.overlay_text || "");
+        let post = buf;
+        let watermarkWarning = null;
+        if (overlayText) {
+          try {
+            post = await burnTextOntoVideo(post, overlayText);
+          } catch (e) {
+            console.warn("overlay video", job.id, e.message);
+          }
+        }
+        if (job.voice_id && job.voice_id !== "none") {
+          try {
+            let narr = String(job.narration_text || "").trim();
+            if (!narr) {
+              const draft = db.prepare("SELECT variants, topic FROM drafts WHERE id = ?").get(job.draft_id);
+              const variants = safeParseVariants(draft?.variants);
+              const script = Object.values(variants)[0] || "";
+              const labels = parseFilmLabels(script);
+              narr = narrationFromLabels(labels) || String(draft?.topic || "").slice(0, 200);
+            }
+            if (narr && ttsConfigured()) {
+              const speech = await synthesizeSpeech(narr, job.voice_id);
+              post = await muxNarrationOntoVideo(post, speech.buf, { audioExt: speech.ext });
+            }
+          } catch (e) {
+            console.warn("voice mux", job.id, e.message);
+          }
+        }
+        // Social-safe encode before watermark so the mark lands on the final shareable frames.
+        let socialized = false;
+        try {
+          const social = await normalizeVideoForShare(post);
+          if (social?.length && social !== post) {
+            post = social;
+            socialized = true;
+          }
+        } catch (e) {
+          console.warn("social normalize", job.id, e.message);
+        }
+        if (job.watermark) {
+          try {
+            const profile = readProfile(job.user_id);
+            const wmBuf = loadWatermarkBuffer(job.user_id, profile.watermark_media_url);
+            if (!wmBuf) {
+              watermarkWarning =
+                "Clip ready — watermark missing from Brand Brain. Upload a logo in Setup and regenerate.";
+              console.warn("watermark video", job.id, "no watermark media on profile");
+            } else {
+              post = await burnWatermarkOntoVideo(post, wmBuf, { position: "br" });
+              socialized = true; // watermark re-encodes as social-safe H.264
+            }
+          } catch (e) {
+            watermarkWarning = `Clip ready — watermark failed (${e.message || "encode error"}). Try again.`;
+            console.warn("watermark video", job.id, e.message);
+          }
+        }
+
+        // Prefer post-processed / social-safe bytes; fall back to the raw clip already on the draft.
+        if ((socialized || post !== buf) && post?.length) {
+          try {
+            saved = saveDownloadedMedia(job.user_id, post, mime);
+            if (draftRow) replaceDraftMedia(draftRow, saved.url);
+          } catch (e) {
+            console.warn("post-process save", job.id, e.message);
+          }
+        }
+        db.prepare(
+          "UPDATE imagine_jobs SET status = 'done', progress = 100, media_url = ?, error = ?, updated_at = ? WHERE id = ?"
+        ).run(saved.url, watermarkWarning, now(), job.id);
       }
     } else if (poll.status === "failed" || poll.status === "expired") {
-      db.prepare(
-        "UPDATE imagine_jobs SET status = 'failed', error = ?, progress = ?, updated_at = ? WHERE id = ?"
-      ).run(poll.error || `Generation ${poll.status}`, poll.progress ?? 0, ts, job.id);
+      failImagineJob(job, poll.error || `Generation ${poll.status}`, {
+        progress: poll.progress ?? 0,
+      });
     }
   } catch (err) {
     console.error("imagine sync", job.id, err.message);
@@ -988,34 +1552,55 @@ function jobJson(row) {
     prompt: row.prompt,
     error: row.error,
     media_url: row.media_url,
+    watermark: Boolean(row.watermark),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
 }
 
 app.get("/api/imagine/status", wrap((req, res) => {
+  const tier = getTier(req.userId);
   const usage = imagineUsage(req.userId);
   res.json({
     ...usage,
-    tier: getTier(req.userId),
-    studio: getTier(req.userId) === "studio" || req.userId === 1,
+    tier,
+    studio: tier === "studio" || req.userId === 1,
+    creator: ["creator", "studio"].includes(tier) || req.userId === 1,
+    voices: listTtsVoices(),
   });
 }));
 
 app.post("/api/imagine/video", async (req, res) => {
   try {
-    if (!requireTier(req, res, "studio")) return;
+    const wait = hitLimit(imagineHits, req.userId, 20, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
+    }
+    const tier = getTier(req.userId);
+    const isStudio = tier === "studio" || req.userId === 1;
+    let usage = videoUsage(req.userId);
+    if (!isStudio && usage.credits <= 0) {
+      return res.status(402).json({
+        error: "AI video is a Studio feature — upgrade, or buy video credits on Setup.",
+        upgrade: "studio",
+      });
+    }
     if (!imagineConfigured()) {
       return res.status(503).json({
         error: "AI clip generation is not configured. Add XAI_API_KEY on the hub.",
       });
     }
-    const usage = imagineUsage(req.userId);
-    if (usage.used >= usage.limit) {
+    if (imagineQueueFull()) {
       return res.status(429).json({
-        error: `You've used all ${usage.limit} AI clips this month. Limit resets on the 1st.`,
-        used: usage.used,
-        limit: usage.limit,
+        error: "AI clips are busy — wait a minute and try again. A few generate at a time so the server stays fast.",
+      });
+    }
+    if (usage.remaining <= 0) {
+      return res.status(429).json({
+        error: isStudio
+          ? `You've used your ${usage.included} included clips this month. Buy more credits on Setup, or wait until the 1st.`
+          : "No video credits left. Buy a pack on Setup.",
+        ...usage,
       });
     }
 
@@ -1025,11 +1610,25 @@ app.post("/api/imagine/video", async (req, res) => {
     if (!draft) return res.status(404).json({ error: "Draft not found" });
 
     const platform = req.body?.platform || "tiktok";
-    const variants = JSON.parse(draft.variants || "{}");
+    const variants = safeParseVariants(draft.variants);
     const script = (req.body?.script || variants[platform] || variants.tiktok || Object.values(variants)[0] || "").trim();
     const labels = parseFilmLabels(script);
     const profile = readProfile(req.userId);
-    const prompt =
+    // Never let the model paint text — hub overlays exact ON_SCREEN after generation.
+    const wantOverlay = req.body?.overlay !== false;
+    let overlayText = normalizeOnScreen(
+      req.body?.overlay_text || req.body?.on_screen || labels.onScreen || ""
+    );
+    const voiceId = String(req.body?.voice_id || "none").trim() || "none";
+    const narrationText =
+      voiceId !== "none"
+        ? String(req.body?.narration || "")
+            .trim()
+            .slice(0, 900) ||
+          narrationFromLabels(labels) ||
+          String(draft.topic || "").slice(0, 200)
+        : null;
+    const rawPrompt =
       (req.body?.prompt || "").trim() ||
       labels.imagine ||
       buildVideoPrompt({
@@ -1040,8 +1639,14 @@ app.post("/api/imagine/video", async (req, res) => {
         keyword: labels.keyword,
         brandVoice: profile.brand_voice,
       });
+    const sanitized = sanitizeImaginePrompt(rawPrompt);
+    const prompt = sanitized.prompt;
+    const blockedPrompt = findBlockedContent(prompt) || findBlockedContent(draft.topic);
+    if (blockedPrompt) return res.status(400).json({ error: blockedPrompt });
+    if (!overlayText && sanitized.extractedOnScreen) {
+      overlayText = normalizeOnScreen(sanitized.extractedOnScreen);
+    }
 
-    // Image-to-video when the draft already has a still attached.
     let imageUrl = null;
     if (draft.media_url) {
       const mediaId = draft.media_url.split("/").pop();
@@ -1052,25 +1657,57 @@ app.post("/api/imagine/video", async (req, res) => {
     }
     if (req.body?.image_url) imageUrl = req.body.image_url;
 
-    const duration = Math.min(12, Math.max(4, Number(req.body?.duration) || 8));
-    const { requestId } = await startVideoGeneration({
-      prompt,
-      imageUrl,
-      duration,
-      aspectRatio: req.body?.aspect_ratio || "9:16",
-      resolution: req.body?.resolution || "720p",
-    });
+    const wantWatermark = req.body?.watermark !== false && Boolean(resolveWatermarkUrl(req.userId));
+    const duration = Math.min(8, Math.max(4, Number(req.body?.duration) || 6));
+
+    let burnedCredit = false;
+    if (usage.included_remaining <= 0) {
+      if (!consumeVideoCredit(req.userId)) {
+        return res.status(429).json({
+          error: "No video credits left. Buy a pack on Setup.",
+          ...videoUsage(req.userId),
+        });
+      }
+      burnedCredit = true;
+    }
+
+    let requestId;
+    try {
+      ({ requestId } = await startVideoGeneration({
+        prompt,
+        imageUrl,
+        duration,
+        aspectRatio: req.body?.aspect_ratio || "9:16",
+        // 720p is the durable default — 1080p OOMed the small Fly VM during overlay.
+        resolution: req.body?.resolution || "720p",
+      }));
+    } catch (err) {
+      if (burnedCredit) refundVideoCredit(req.userId);
+      throw err;
+    }
 
     const ts = now();
     const info = db
       .prepare(
-        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, created_at, updated_at)
-         VALUES (?, ?, 'video', ?, 'pending', 0, ?, ?, ?)`
+        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, overlay_text, voice_id, narration_text, credit_charged, watermark, created_at, updated_at)
+         VALUES (?, ?, 'video', ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(req.userId, draftId, requestId, prompt, ts, ts);
+      .run(
+        req.userId,
+        draftId,
+        requestId,
+        prompt,
+        wantOverlay ? overlayText : null,
+        voiceId !== "none" ? voiceId : null,
+        narrationText,
+        burnedCredit ? 1 : 0,
+        wantWatermark ? 1 : 0,
+        ts,
+        ts
+      );
 
     const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json(jobJson(row));
+    res.status(201).json({ ...jobJson(row), usage: videoUsage(req.userId) });
   } catch (err) {
     console.error(err);
     res.status(err.status && err.status < 600 ? err.status : 500).json({
@@ -1081,18 +1718,30 @@ app.post("/api/imagine/video", async (req, res) => {
 
 app.post("/api/imagine/still", async (req, res) => {
   try {
-    if (!requireTier(req, res, "studio")) return;
+    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
+    }
+    if (!requireTier(req, res, "creator")) return;
     if (!imagineConfigured()) {
       return res.status(503).json({
         error: "AI image generation is not configured. Add XAI_API_KEY on the hub.",
       });
     }
-    const usage = imagineUsage(req.userId);
-    if (usage.used >= usage.limit) {
+    if (imagineQueueFull()) {
       return res.status(429).json({
-        error: `You've used all ${usage.limit} AI media generations this month.`,
-        used: usage.used,
-        limit: usage.limit,
+        error: "AI images are busy — wait a minute and try again.",
+      });
+    }
+    const usage = stillUsage(req.userId);
+    if (usage.remaining <= 0) {
+      return res.status(429).json({
+        error:
+          usage.limit === 0
+            ? "AI stills are on Creator+. Upgrade to unlock."
+            : `You've used all ${usage.limit} AI stills this month. Limit resets on the 1st.`,
+        upgrade: usage.limit === 0 ? "creator" : undefined,
+        ...usage,
       });
     }
 
@@ -1102,32 +1751,161 @@ app.post("/api/imagine/still", async (req, res) => {
     if (!draft) return res.status(404).json({ error: "Draft not found" });
 
     const platform = req.body?.platform || "tiktok";
-    const variants = JSON.parse(draft.variants || "{}");
+    const variants = safeParseVariants(draft.variants);
     const script = (variants[platform] || variants.tiktok || "").trim();
     const labels = parseFilmLabels(script);
-    const prompt =
+    const rawPrompt =
       (req.body?.prompt || "").trim() ||
-      `Vertical 9:16 social still for TikTok/Reels. Topic: ${draft.topic}. Hook: ${labels.hook || draft.topic}. On-screen idea: ${labels.onScreen || labels.hook}. No text burned into the image. Clean, scroll-stopping.`;
+      `Vertical 9:16 social still for TikTok/Reels. Topic: ${draft.topic}. Hook: ${labels.hook || draft.topic}. Visual focus (no text): ${labels.onScreen || labels.hook}. Clean, scroll-stopping.`;
+    const sanitized = sanitizeImaginePrompt(rawPrompt, { forStill: true });
+    const prompt = sanitized.prompt;
+    const blockedPrompt = findBlockedContent(prompt) || findBlockedContent(draft.topic);
+    if (blockedPrompt) return res.status(400).json({ error: blockedPrompt });
 
+    const wantOverlay = req.body?.overlay !== false;
+    let overlayText = normalizeOnScreen(
+      req.body?.overlay_text || req.body?.on_screen || labels.onScreen || ""
+    );
+    if (!overlayText && sanitized.extractedOnScreen) {
+      overlayText = normalizeOnScreen(sanitized.extractedOnScreen);
+    }
+    const wantWatermark = req.body?.watermark !== false && Boolean(resolveWatermarkUrl(req.userId));
     const { url } = await generateStill({ prompt, aspectRatio: "9:16" });
+    let { buf, mime } = await downloadBinary(url);
+    mime = mime.startsWith("image/") ? mime : "image/png";
+    if (wantOverlay && overlayText) {
+      try {
+        buf = await burnTextOntoImage(buf, overlayText);
+        mime = "image/jpeg";
+      } catch (e) {
+        console.warn("overlay still", e.message);
+      }
+    }
+    if (wantWatermark) {
+      try {
+        const wmUrl = resolveWatermarkUrl(req.userId);
+        const wmBuf = loadWatermarkBuffer(req.userId, wmUrl);
+        if (wmBuf) {
+          buf = await burnWatermarkOntoImage(buf, wmBuf);
+          mime = "image/jpeg";
+        }
+      } catch (e) {
+        console.warn("watermark still", e.message);
+      }
+    }
+    const saved = saveDownloadedMedia(req.userId, buf, mime);
+    replaceDraftMedia(draft, saved.url);
+
+    const ts = now();
+    const info = db
+      .prepare(
+        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, overlay_text, watermark, media_url, created_at, updated_at)
+         VALUES (?, ?, 'still', NULL, 'done', 100, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        req.userId,
+        draftId,
+        prompt,
+        wantOverlay ? overlayText : null,
+        wantWatermark ? 1 : 0,
+        saved.url,
+        ts,
+        ts
+      );
+
+    const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
+    res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+  } catch (err) {
+    console.error(err);
+    res.status(err.status && err.status < 600 ? err.status : 500).json({
+      error: err.message || "Failed to generate still",
+    });
+  }
+});
+
+/** Edit an existing draft photo with Grok Imagine (counts toward still allowance). */
+app.post("/api/imagine/edit", async (req, res) => {
+  try {
+    if (!requireTier(req, res, "creator")) return;
+    if (!imagineConfigured()) {
+      return res.status(503).json({
+        error: "AI image editing is not configured. Add XAI_API_KEY on the hub.",
+      });
+    }
+    const usage = stillUsage(req.userId);
+    if (usage.remaining <= 0) {
+      return res.status(429).json({
+        error:
+          usage.limit === 0
+            ? "Photo edits are on Creator+. Upgrade to unlock."
+            : `You've used all ${usage.limit} AI stills/edits this month. Limit resets on the 1st.`,
+        upgrade: usage.limit === 0 ? "creator" : undefined,
+        ...usage,
+      });
+    }
+
+    const draftId = Number(req.body?.draft_id);
+    if (!draftId) return res.status(400).json({ error: "draft_id is required" });
+    const draft = db.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").get(draftId, req.userId);
+    if (!draft) return res.status(404).json({ error: "Draft not found" });
+    if (!draft.media_url) {
+      return res.status(400).json({ error: "This draft has no photo to edit. Attach one first." });
+    }
+
+    const mediaId = String(draft.media_url).split("/").pop()?.split("?")[0];
+    const media = mediaId
+      ? db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId)
+      : null;
+    if (media && !media.mime?.startsWith("image/")) {
+      return res.status(400).json({ error: "Only photos can be edited — not video clips." });
+    }
+
+    const presetKey = String(req.body?.preset || "").trim();
+    const custom = String(req.body?.prompt || "").trim();
+    const prompt = custom || STILL_EDIT_PRESETS[presetKey] || null;
+    if (!prompt) {
+      return res.status(400).json({
+        error: "Pick a quick fix (brighten, clean background…) or describe the change.",
+      });
+    }
+
+    let imageUrl = draft.media_url.startsWith("http")
+      ? draft.media_url
+      : media
+        ? publicMediaUrl(media.id)
+        : draft.media_url;
+    if (media) {
+      try {
+        const filePath = join(mediaDir, media.id);
+        if (existsSync(filePath)) {
+          const buf = readFileSync(filePath);
+          const b64 = buf.toString("base64");
+          imageUrl = `data:${media.mime || "image/jpeg"};base64,${b64}`;
+        }
+      } catch {
+        /* fall back to public URL */
+      }
+    }
+
+    const { url } = await editStill({ imageUrl, prompt, aspectRatio: "9:16" });
     const { buf, mime } = await downloadBinary(url);
     const saved = saveDownloadedMedia(req.userId, buf, mime.startsWith("image/") ? mime : "image/png");
-    db.prepare("UPDATE drafts SET media_url = ? WHERE id = ? AND user_id = ?").run(saved.url, draftId, req.userId);
+    replaceDraftMedia(draft, saved.url);
 
     const ts = now();
     const info = db
       .prepare(
         `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, media_url, created_at, updated_at)
-         VALUES (?, ?, 'still', NULL, 'done', 100, ?, ?, ?, ?)`
+         VALUES (?, ?, 'edit', NULL, 'done', 100, ?, ?, ?, ?)`
       )
       .run(req.userId, draftId, prompt, saved.url, ts, ts);
 
     const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json({ ...jobJson(row), draft_media_url: saved.url });
+    res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
   } catch (err) {
     console.error(err);
     res.status(err.status && err.status < 600 ? err.status : 500).json({
-      error: err.message || "Failed to generate still",
+      error: err.message || "Failed to edit photo",
     });
   }
 });
@@ -1299,7 +2077,7 @@ app.get("/api/export", wrap((req, res) => {
     drafts: db
       .prepare("SELECT * FROM drafts WHERE user_id = ?")
       .all(u)
-      .map((r) => ({ ...r, variants: JSON.parse(r.variants) })),
+      .map((r) => ({ ...r, variants: safeParseVariants(r.variants) })),
     schedule: db.prepare("SELECT * FROM schedule_blocks WHERE user_id = ?").all(u),
     workouts: db.prepare("SELECT * FROM workouts WHERE user_id = ?").all(u),
     posts: db.prepare("SELECT * FROM posts WHERE user_id = ?").all(u),
@@ -1339,9 +2117,9 @@ async function publishDuePosts() {
         );
       }
       const draft = db.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").get(sp.draft_id, sp.user_id);
-      const raw = draft ? (JSON.parse(draft.variants)[sp.platform] || "").trim() : "";
+      const raw = draft ? (safeParseVariants(draft.variants)[sp.platform] || "").trim() : "";
       if (!raw) throw new Error("Draft or platform version no longer exists.");
-      const text = extractPostCaption(raw, sp.platform);
+      const text = withBrandTag(extractPostCaption(raw, sp.platform), getTier(sp.user_id));
       const { externalId } = await publish({ userId: sp.user_id, platform: sp.platform, text });
       db.prepare("UPDATE scheduled_posts SET status = 'posted', external_id = ? WHERE id = ?").run(
         externalId || null,
@@ -1365,14 +2143,48 @@ setInterval(() => publishDuePosts().catch((e) => console.error(e)), 60_000);
 
 async function syncPendingImagineJobs() {
   if (!imagineConfigured()) return;
+
+  // Jobs abandoned after hub OOM / crash.
+  // If we already saved a clip (progress ~96), finish the job instead of refunding.
+  const stuck = db
+    .prepare(
+      `SELECT * FROM imagine_jobs
+       WHERE status = 'pending'
+         AND created_at < datetime('now', '-15 minutes')`
+    )
+    .all();
+  for (const job of stuck) {
+    if (job.media_url) {
+      db.prepare(
+        "UPDATE imagine_jobs SET status = 'done', progress = 100, error = NULL, updated_at = ? WHERE id = ? AND status = 'pending'"
+      ).run(now(), job.id);
+      continue;
+    }
+    failImagineJob(
+      job,
+      "Generation timed out or the hub restarted mid-job. Your credit was restored — try again."
+    );
+  }
+
   const pending = db
-    .prepare("SELECT * FROM imagine_jobs WHERE status = 'pending' AND xai_request_id IS NOT NULL LIMIT 10")
+    .prepare(
+      `SELECT * FROM imagine_jobs
+       WHERE status = 'pending' AND xai_request_id IS NOT NULL
+       ORDER BY created_at ASC LIMIT 5`
+    )
     .all();
   for (const job of pending) {
     await syncImagineJob(job);
   }
 }
 setInterval(() => syncPendingImagineJobs().catch((e) => console.error("[imagine]", e)), 15_000);
+
+// Auto-detect crypto deposits and credit after enough confirmations (admin mark-paid still works).
+if (process.env.CRYPTO_WATCH_DISABLED !== "1") {
+  const runCryptoWatch = () => syncCryptoDeposits().catch((e) => console.error("[crypto]", e));
+  setTimeout(runCryptoWatch, 45_000);
+  setInterval(runCryptoWatch, Number(process.env.CRYPTO_WATCH_INTERVAL_MS || 60_000));
+}
 
 // ---- Weekly growth-tips worker: refreshes each active user's AI analysis ----
 // Checks every 6 hours; each user gets at most one batch per 7 days.
@@ -1386,6 +2198,12 @@ const PORT = process.env.PORT || 8787;
 const HOST = process.env.HOST || "0.0.0.0";
 app.listen(PORT, HOST, () => {
   console.log(`Brand hub listening on http://${HOST}:${PORT}`);
-  if (!process.env.ANTHROPIC_API_KEY) console.warn("WARNING: ANTHROPIC_API_KEY not set - content generation will fail.");
+  if (!anthropicConfigured() && !grokTextConfigured()) {
+    console.warn("WARNING: neither ANTHROPIC_API_KEY nor XAI_API_KEY set — text generation will fail.");
+  } else if (!anthropicConfigured()) {
+    console.warn("NOTE: ANTHROPIC_API_KEY not set — Claude text provider unavailable (Grok OK).");
+  } else if (!grokTextConfigured()) {
+    console.warn("NOTE: XAI_API_KEY not set — Grok text/Imagine unavailable.");
+  }
   if (!imagineConfigured()) console.warn("NOTE: XAI_API_KEY not set - Studio AI clips/stills disabled.");
 });

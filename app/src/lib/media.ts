@@ -21,7 +21,7 @@ export async function prepareMedia(file: File): Promise<File> {
     canvas.width = Math.round(bitmap.width * scale);
     canvas.height = Math.round(bitmap.height * scale);
     canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
     if (blob && (needsConvert || blob.size < file.size)) {
       return new File([blob], "photo.jpg", { type: "image/jpeg" });
     }

@@ -11,7 +11,8 @@ mkdirSync(dirname(dbPath), { recursive: true });
 
 export const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
-db.pragma("busy_timeout = 5000");
+db.pragma("synchronous = NORMAL");
+db.pragma("busy_timeout = 8000");
 db.pragma("foreign_keys = ON");
 
 // Uploaded media lives next to the database (on the Fly volume in production).
@@ -230,6 +231,120 @@ if (!hasColumn("users", "stripe_customer_id")) {
 }
 if (!hasColumn("users", "stripe_subscription_id")) {
   db.exec("ALTER TABLE users ADD COLUMN stripe_subscription_id TEXT");
+}
+
+// v5 -> v6: purchased Imagine video credits (overflow past monthly included)
+if (!hasColumn("users", "video_credits")) {
+  db.exec("ALTER TABLE users ADD COLUMN video_credits INTEGER NOT NULL DEFAULT 0");
+}
+
+// Overlay text + optional TTS voice on imagine jobs
+if (!hasColumn("imagine_jobs", "overlay_text")) {
+  db.exec("ALTER TABLE imagine_jobs ADD COLUMN overlay_text TEXT");
+}
+if (!hasColumn("imagine_jobs", "voice_id")) {
+  db.exec("ALTER TABLE imagine_jobs ADD COLUMN voice_id TEXT");
+}
+if (!hasColumn("imagine_jobs", "narration_text")) {
+  db.exec("ALTER TABLE imagine_jobs ADD COLUMN narration_text TEXT");
+}
+if (!hasColumn("imagine_jobs", "credit_charged")) {
+  db.exec("ALTER TABLE imagine_jobs ADD COLUMN credit_charged INTEGER NOT NULL DEFAULT 0");
+}
+if (!hasColumn("imagine_jobs", "watermark")) {
+  db.exec("ALTER TABLE imagine_jobs ADD COLUMN watermark INTEGER NOT NULL DEFAULT 0");
+}
+
+// Custom brand watermark (media URL owned by the user).
+if (!hasColumn("profiles", "watermark_media_url")) {
+  db.exec("ALTER TABLE profiles ADD COLUMN watermark_media_url TEXT");
+}
+
+if (!hasColumn("users", "terms_accepted_at")) {
+  db.exec("ALTER TABLE users ADD COLUMN terms_accepted_at TEXT");
+}
+if (!hasColumn("users", "disabled_at")) {
+  db.exec("ALTER TABLE users ADD COLUMN disabled_at TEXT");
+}
+if (!hasColumn("users", "last_login_at")) {
+  db.exec("ALTER TABLE users ADD COLUMN last_login_at TEXT");
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS contacts (
+    email TEXT PRIMARY KEY,
+    user_id INTEGER,
+    source TEXT NOT NULL DEFAULT 'password',
+    first_seen_at TEXT NOT NULL,
+    last_login_at TEXT NOT NULL,
+    last_notified_at TEXT
+  );
+`);
+db.exec("CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts (user_id)");
+
+// Capture/source media so users can revert after Imagine still/edit/video.
+if (!hasColumn("drafts", "original_media_url")) {
+  db.exec("ALTER TABLE drafts ADD COLUMN original_media_url TEXT");
+  // Prefer the linked idea's capture when we still have it.
+  db.exec(`
+    UPDATE drafts
+    SET original_media_url = (
+      SELECT ideas.media_url FROM ideas
+      WHERE ideas.id = drafts.idea_id AND ideas.media_url IS NOT NULL AND ideas.media_url != ''
+    )
+    WHERE original_media_url IS NULL AND idea_id IS NOT NULL
+  `);
+  // Drafts never rewritten by Imagine: current attachment is the original.
+  db.exec(`
+    UPDATE drafts
+    SET original_media_url = media_url
+    WHERE original_media_url IS NULL
+      AND media_url IS NOT NULL
+      AND media_url != ''
+      AND id NOT IN (SELECT DISTINCT draft_id FROM imagine_jobs WHERE draft_id IS NOT NULL)
+  `);
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS crypto_invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    product TEXT NOT NULL,
+    amount_usd REAL NOT NULL,
+    chain TEXT NOT NULL DEFAULT 'manual',
+    pay_to TEXT,
+    memo TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    admin_note TEXT,
+    paid_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`);
+
+if (!hasColumn("crypto_invoices", "asset")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN asset TEXT");
+}
+if (!hasColumn("crypto_invoices", "method_id")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN method_id TEXT");
+}
+if (!hasColumn("crypto_invoices", "tx_hash")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN tx_hash TEXT");
+}
+if (!hasColumn("crypto_invoices", "confirmations")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0");
+}
+if (!hasColumn("crypto_invoices", "expected_raw")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN expected_raw TEXT");
+}
+if (!hasColumn("crypto_invoices", "detected_at")) {
+  db.exec("ALTER TABLE crypto_invoices ADD COLUMN detected_at TEXT");
+}
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_crypto_invoices_tx_hash ON crypto_invoices(tx_hash) WHERE tx_hash IS NOT NULL AND tx_hash != ''");
+} catch {
+  /* older SQLite may lack partial indexes — ignore */
 }
 
 // v1 had a singleton "profile" table; move its row to the per-user "profiles".

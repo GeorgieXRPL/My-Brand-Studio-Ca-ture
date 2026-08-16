@@ -6,6 +6,7 @@ import type {
   GrowthStatus,
   Idea,
   ImagineJob,
+  ImagineStatus,
   Insight,
   Me,
   Post,
@@ -23,7 +24,7 @@ const AUTH_EMAIL_KEY = "authEmail";
 
 // The hosted hub baked in at build time. A custom self-hosted hub
 // (URL + shared token in localStorage) overrides it.
-const HOSTED_HUB = (import.meta.env.VITE_HUB_URL || "").replace(/\/$/, "");
+const HOSTED_HUB = (import.meta.env.VITE_HUB_URL || "https://brand-studio-hub.fly.dev").replace(/\/$/, "");
 
 export function isSelfHost(): boolean {
   return Boolean(localStorage.getItem(URL_KEY));
@@ -87,16 +88,25 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new Error(msg);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new Error("Hub returned an invalid response. Try again.");
+  }
 }
 
 export const api = {
   health: () => request<{ ok: boolean }>("/api/health"),
 
-  signup: (email: string, password: string, ref?: string) =>
+  signup: (email: string, password: string, ref?: string, opts?: { terms_accepted?: boolean }) =>
     request<{ token: string; email: string }>("/api/auth/signup", {
       method: "POST",
-      body: JSON.stringify({ email, password, ref: ref || undefined }),
+      body: JSON.stringify({
+        email,
+        password,
+        ref: ref || undefined,
+        terms_accepted: opts?.terms_accepted ?? true,
+      }),
     }),
   login: (email: string, password: string) =>
     request<{ token: string; email: string }>("/api/auth/login", {
@@ -105,6 +115,11 @@ export const api = {
     }),
   logout: () => request<{ ok: true }>("/api/auth/logout", { method: "POST" }),
   me: () => request<Me>("/api/auth/me"),
+  acceptTerms: () =>
+    request<{ ok: true; terms_accepted_at: string | null }>("/api/auth/accept-terms", {
+      method: "POST",
+      body: "{}",
+    }),
   authProviders: () => request<{ password: boolean; google: boolean }>("/api/auth/providers"),
 
   getProfile: () => request<Profile>("/api/profile"),
@@ -118,29 +133,108 @@ export const api = {
   deleteIdea: (id: number) => request<{ ok: true }>(`/api/ideas/${id}`, { method: "DELETE" }),
 
   getDrafts: () => request<Draft[]>("/api/drafts"),
-  generate: (payload: { topic?: string; idea_id?: number; media_url?: string }) =>
+  generate: (payload: {
+    topic?: string;
+    idea_id?: number;
+    media_url?: string;
+    text_provider?: "claude" | "grok";
+  }) =>
     request<Draft>("/api/generate", { method: "POST", body: JSON.stringify(payload) }),
   updateDraft: (id: number, patch: { status?: string; variants?: Variants; topic?: string; media_url?: string | null }) =>
     request<Draft>(`/api/drafts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  revertDraftMedia: (id: number) =>
+    request<Draft>(`/api/drafts/${id}/revert-media`, { method: "POST", body: "{}" }),
   deleteDraft: (id: number) => request<{ ok: true }>(`/api/drafts/${id}`, { method: "DELETE" }),
 
-  imagineStatus: () =>
-    request<{ configured: boolean; used: number; limit: number; tier: string; studio: boolean }>(
-      "/api/imagine/status"
-    ),
+  imagineStatus: () => request<ImagineStatus>("/api/imagine/status"),
   startImagineVideo: (payload: {
     draft_id: number;
     platform?: string;
     duration?: number;
     prompt?: string;
     image_url?: string;
+    overlay?: boolean;
+    overlay_text?: string;
+    watermark?: boolean;
+    voice_id?: string;
+    narration?: string;
+    resolution?: string;
   }) =>
     request<ImagineJob>("/api/imagine/video", { method: "POST", body: JSON.stringify(payload) }),
-  startImagineStill: (payload: { draft_id: number; platform?: string; prompt?: string }) =>
+  startImagineStill: (payload: {
+    draft_id: number;
+    platform?: string;
+    prompt?: string;
+    overlay?: boolean;
+    overlay_text?: string;
+    watermark?: boolean;
+  }) =>
     request<ImagineJob & { draft_media_url?: string }>("/api/imagine/still", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  billingCryptoConfig: () =>
+    request<{
+      enabled: boolean;
+      pay_to: string;
+      chain: string;
+      note: string;
+      methods: Array<{
+        id: string;
+        chain: string;
+        asset: string;
+        label: string;
+        kind: string;
+        pay_to: string;
+        token?: string;
+      }>;
+      addresses?: { solana: string | null; ethereum: string | null };
+      prices: { creator: number; studio: number; credits: Record<string, { credits: number; usd: number }> };
+    }>("/api/billing/crypto"),
+  billingCryptoInvoice: (product: string, method?: string) =>
+    request<{
+      invoice: { id: number; amount_usd: number; product: string };
+      method: string;
+      pay_to: string;
+      chain: string;
+      asset: string;
+      label: string;
+      token: string | null;
+      note: string;
+      amount_usd: number;
+    }>("/api/billing/crypto/invoice", {
+      method: "POST",
+      body: JSON.stringify({ product, method }),
+    }),
+  editImagineStill: (payload: { draft_id: number; preset?: string; prompt?: string }) =>
+    request<ImagineJob & { draft_media_url?: string }>("/api/imagine/edit", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  previewVoice: async (voiceId: string, text?: string) => {
+    const base = getHubUrl();
+    if (!base) throw new Error("Hub not configured. Open Setup to connect.");
+    const res = await fetch(`${base}/api/imagine/voices/preview`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getActiveToken()}`,
+      },
+      body: JSON.stringify({ voice_id: voiceId, text: text || undefined }),
+    });
+    if (!res.ok) {
+      let msg = `Request failed (${res.status})`;
+      try {
+        const body = await res.json();
+        if (body?.error) msg = body.error;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(msg);
+    }
+    return res.blob();
+  },
   getImagineJob: (id: number) => request<ImagineJob>(`/api/imagine/jobs/${id}`),
   getImagineJobs: (draftId?: number) =>
     request<ImagineJob[]>(draftId ? `/api/imagine/jobs?draft_id=${draftId}` : "/api/imagine/jobs"),
@@ -187,6 +281,11 @@ export const api = {
     request<{ url: string }>("/api/billing/checkout", {
       method: "POST",
       body: JSON.stringify({ tier }),
+    }),
+  billingCreditsCheckout: (pack: "5" | "15" | "40") =>
+    request<{ url: string }>("/api/billing/credits/checkout", {
+      method: "POST",
+      body: JSON.stringify({ pack }),
     }),
   billingPortal: () => request<{ url: string }>("/api/billing/portal", { method: "POST", body: "{}" }),
 
@@ -236,3 +335,15 @@ export const api = {
 
   exportData: () => request<unknown>("/api/export"),
 };
+
+export function googleStartUrl(): string {
+  const base = getHubUrl();
+  const url = new URL("/api/auth/google/start", base.endsWith("/") ? base : `${base}/`);
+  try {
+    const ref = localStorage.getItem("refCode");
+    if (ref) url.searchParams.set("ref", ref);
+  } catch {
+    /* ignore */
+  }
+  return url.toString();
+}

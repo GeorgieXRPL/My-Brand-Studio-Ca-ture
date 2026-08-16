@@ -89,6 +89,10 @@ export default function CameraCapture({
       // Soft constraints — avoid forcing 1080p which fails on some Ultra / fold sensors.
       const attempts: MediaStreamConstraints[] = [
         {
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: mode === "video",
+        },
+        {
           video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: mode === "video",
         },
@@ -207,7 +211,7 @@ export default function CameraCapture({
         onClose();
       },
       "image/jpeg",
-      0.88
+      0.92
     );
   }
 
@@ -220,7 +224,12 @@ export default function CameraCapture({
       : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
         ? "video/webm;codecs=vp9"
         : "video/webm";
-    const rec = new MediaRecorder(stream, { mimeType: mime });
+    const recOpts: MediaRecorderOptions = { mimeType: mime };
+    if (typeof MediaRecorder !== "undefined") {
+      // Prefer ~6–8 Mbps when the browser honors it.
+      (recOpts as MediaRecorderOptions & { videoBitsPerSecond?: number }).videoBitsPerSecond = 7_000_000;
+    }
+    const rec = new MediaRecorder(stream, recOpts);
     rec.ondataavailable = (e) => {
       if (e.data.size) chunksRef.current.push(e.data);
     };

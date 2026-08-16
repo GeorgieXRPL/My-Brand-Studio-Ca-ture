@@ -7,7 +7,7 @@
 // their numbers to collectStats() and the prompt automatically uses them.
 
 import { db } from "./db.js";
-import { generateGrowthTips } from "./claude.js";
+import { generateGrowthTips } from "./textGen.js";
 import { ALGO_KNOWLEDGE_CUTOFF } from "./algoContext.js";
 
 const WEEK_MS = 7 * 24 * 3600e3;

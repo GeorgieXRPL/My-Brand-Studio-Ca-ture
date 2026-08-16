@@ -6,10 +6,11 @@ primary_region = "syd"
   PORT = "8787"
   DB_PATH = "/data/hub.db"
   ANTHROPIC_MODEL = "claude-sonnet-4-5"
-  ALLOWED_ORIGINS = "https://app-bay-nu-40.vercel.app,http://localhost:5173"
+  ALLOWED_ORIGINS = "https://mybrandstudio.club,https://www.mybrandstudio.club,https://app.mybrandstudio.club,https://app-bay-nu-40.vercel.app,http://localhost:5173"
   HUB_PUBLIC_URL = "https://brand-studio-hub.fly.dev"
-  APP_URL = "https://app-bay-nu-40.vercel.app"
-  APP_ORIGIN = "https://app-bay-nu-40.vercel.app"
+  APP_URL = "https://app.mybrandstudio.club"
+  APP_ORIGIN = "https://app.mybrandstudio.club"
+  XAI_TEXT_MODEL = "grok-4.3"
 
 [mounts]
   source = "hub_data"
@@ -24,4 +25,4 @@ primary_region = "syd"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "256mb"
+  memory = "1024mb"

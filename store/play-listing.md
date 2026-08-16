@@ -53,7 +53,7 @@ content creator, social media scheduler, voice to text, AI content, cross postin
 
 ## Contact
 
-- Website: https://app-bay-nu-40.vercel.app
+- Website: https://mybrandstudio.club
 - Email: hello@brand-studio.app
 
 ## Graphics checklist

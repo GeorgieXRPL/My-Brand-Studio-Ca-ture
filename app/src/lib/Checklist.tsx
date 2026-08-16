@@ -40,13 +40,13 @@ export default function Checklist({
     {
       done: hasBrand,
       label: t("Teach your Brand Brain"),
-      hint: t("Goals + voice in Setup"),
+      hint: t("Who you talk to + how you sound"),
       to: "/setup",
     },
     {
       done: hasDraft,
-      label: t("Capture & draft your first idea"),
-      hint: t("Tap the mic, then Draft now"),
+      label: t("Speak, draft, then Share"),
+      hint: t("Talk it out, Draft now, open Drafts, tap Share"),
     },
   ];
 
@@ -58,7 +58,7 @@ export default function Checklist({
           <div>
             <b>{t("Your first wins")}</b>
             <p className="muted small" style={{ margin: "2px 0 0" }}>
-              {t("Three steps — then you're flying.")}
+              {t("Three steps — then your voice ships.")}
             </p>
           </div>
         </div>

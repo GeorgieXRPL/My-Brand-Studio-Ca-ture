@@ -20,9 +20,72 @@ export type FilmEdit = {
   caption: string;
   imagine: string;
   onScreen: string;
-  /** Burn on-screen text into the generated clip/still. */
+  /** Apply deterministic on-screen overlay after generation (hub draws text). */
   burnIn: boolean;
+  /** Stamp the Brand Brain watermark on still/video output. */
+  watermark?: boolean;
+  /** Optional TTS / delivery voice id, or "none". */
+  voiceId?: string;
 };
+
+/** Voice styles for talk-track delivery + Studio AI clip narration. */
+export type VoiceStyle = {
+  id: string;
+  label: string;
+  vibe: string;
+  example: string;
+};
+
+export const VOICE_STYLES: VoiceStyle[] = [
+  {
+    id: "eve",
+    label: "Eve",
+    vibe: "Energetic & upbeat",
+    example: "Stop scrolling — this tip takes ten seconds and actually works.",
+  },
+  {
+    id: "ara",
+    label: "Ara",
+    vibe: "Warm & conversational",
+    example: "Hey, real talk — here's what I'd try first.",
+  },
+  {
+    id: "rex",
+    label: "Rex",
+    vibe: "Confident & clear",
+    example: "Three moves. Do these and you'll feel the difference today.",
+  },
+  {
+    id: "sal",
+    label: "Sal",
+    vibe: "Smooth & balanced",
+    example: "Quick walkthrough — keep it simple and stick with it.",
+  },
+  {
+    id: "leo",
+    label: "Leo",
+    vibe: "Authoritative & strong",
+    example: "Listen up. This is the part most people skip — and it matters.",
+  },
+];
+
+export function getVoiceStyle(id?: string | null): VoiceStyle | null {
+  if (!id || id === "none") return null;
+  return VOICE_STYLES.find((v) => v.id === id) || null;
+}
+
+/** Talk track copy with optional voice-style delivery note. */
+export function formatTalkTrackCopy(talkTrack: string, voiceId?: string | null): string {
+  const body = String(talkTrack || "").trim();
+  const style = getVoiceStyle(voiceId);
+  if (!style) return body;
+  return [
+    `Voice style: ${style.label} — ${style.vibe}`,
+    `Speak like: "${style.example}"`,
+    "",
+    body,
+  ].join("\n");
+}
 
 const LABEL =
   /^(hook|beat\s*\d*|on[-\s]?screen|on\s*screen|caption|keyword|visual|spoken|search|imagine|prompt)\s*[:\-–]\s*/i;
@@ -42,12 +105,21 @@ function isLabeledScript(text: string): boolean {
   return /^(hook|beat\s*\d*|on[-\s]?screen|caption|imagine)\s*[:\-–]/im.test(text);
 }
 
+/** Strip double hyphens from copy shown / saved in the app. */
+export function sanitizeClientCopy(text: string): string {
+  return String(text || "")
+    .replace(/\u2014|\u2013/g, " - ")
+    .replace(/--+/g, " - ")
+    .replace(/\s+-\s+/g, " - ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 /**
  * Turn a TikTok / Reels / Snap script-or-caption into a filmable guide.
- * Works with structured "HOOK:" lines or freeform AI scripts.
  */
 export function buildFilmGuide(raw: string, platform: Platform): FilmGuide | null {
-  const text = (raw || "").trim();
+  const text = sanitizeClientCopy(raw || "").trim();
   if (!text || !FILM_PLATFORMS.includes(platform)) return null;
 
   const lines = text
@@ -111,10 +183,11 @@ export function buildFilmGuide(raw: string, platform: Platform): FilmGuide | nul
     beats.push(...more);
   }
 
-  // Full hook punchline as on-screen fallback — do not truncate for display.
   if (!onScreen) {
     onScreen = hook.split(/[.!?]/)[0].trim() || hook.trim();
   }
+  // Keep overlay short for the hub renderer
+  onScreen = onScreen.split(/\s+/).slice(0, 8).join(" ").slice(0, 72);
 
   if (!keyword) {
     const words = hook
@@ -146,7 +219,6 @@ export function buildFilmGuide(raw: string, platform: Platform): FilmGuide | nul
       beats,
       onScreen,
       keyword,
-      burnIn: true,
     });
   }
 
@@ -155,8 +227,8 @@ export function buildFilmGuide(raw: string, platform: Platform): FilmGuide | nul
     beats: beats.slice(0, 5),
     onScreen,
     keyword,
-    caption,
-    imagine,
+    caption: sanitizeClientCopy(caption),
+    imagine: sanitizeClientCopy(imagine),
     talkTrack,
     labeled,
   };
@@ -168,23 +240,16 @@ export function buildDefaultImaginePrompt(parts: {
   beats?: string[];
   onScreen?: string;
   keyword?: string;
-  burnIn?: boolean;
 }): string {
   const beatLine = (parts.beats || []).filter(Boolean).slice(0, 4).join("; ");
-  const burnIn = parts.burnIn !== false;
-  const textLine =
-    burnIn && parts.onScreen
-      ? `Burn this exact text clearly onto the video (large, readable, lower-third or center, high contrast): "${parts.onScreen}".`
-      : "Do not burn any captions, titles, or watermarks onto the video.";
-
   return [
     "Vertical 9:16 short-form social video for TikTok/Reels.",
-    "Energetic, mobile-first, natural motion.",
-    textLine,
+    "Energetic, mobile-first, natural motion, sharp detail.",
+    "Do not burn any captions, titles, watermarks, or on-screen text onto the video. Leave the frame clean for a separate caption overlay.",
     parts.topic ? `Topic: ${parts.topic}.` : "",
     parts.hook ? `Opening energy: ${parts.hook}.` : "",
     beatLine ? `Beats: ${beatLine}.` : "",
-    !burnIn && parts.onScreen ? `Visual focus (no text overlay): ${parts.onScreen}.` : "",
+    parts.onScreen ? `Visual focus (no text overlay): ${parts.onScreen}.` : "",
     parts.keyword ? `Theme: ${parts.keyword}.` : "",
   ]
     .filter(Boolean)
@@ -193,18 +258,23 @@ export function buildDefaultImaginePrompt(parts: {
 }
 
 /**
- * Final prompt sent to Imagine — applies burn-in instruction from current edits.
+ * Final Imagine prompt — never asks the model to paint text (hub overlays it).
  */
 export function resolveImaginePrompt(edit: FilmEdit, film: FilmGuide, topic?: string): string {
   const base = (edit.imagine || film.imagine || "").trim();
   const onScreen = (edit.onScreen || film.onScreen || "").trim();
 
-  // Strip prior burn-in / no-burn instructions so we can re-apply cleanly
-  const cleaned = base
-    .replace(/\bBurn this exact text[^.]+\./gi, "")
+  let cleaned = base
+    .replace(/\bBurn this exact text[\s\S]*?(?=(?:\.\s)|$)/gi, " ")
+    .replace(
+      /\b(?:burn|paint|render)\b[\s\S]{0,40}?\b(?:this )?(?:exact )?(?:text|caption|title|words?)\b[\s\S]{0,200}?(?=(?:\.\s)|$)/gi,
+      " "
+    )
+    .replace(/\blarge,?\s*readable[\s\S]{0,80}?high contrast\b[:\s]*/gi, " ")
     .replace(/\bDo not burn any captions[^.]+\./gi, "")
     .replace(/\bNo burned-in captions or watermarks\.?/gi, "")
     .replace(/\s{2,}/g, " ")
+    .replace(/\s+\./g, ".")
     .trim();
 
   if (!cleaned) {
@@ -214,25 +284,21 @@ export function resolveImaginePrompt(edit: FilmEdit, film: FilmGuide, topic?: st
       beats: film.beats,
       onScreen,
       keyword: film.keyword,
-      burnIn: edit.burnIn,
     });
   }
 
-  const burnLine = edit.burnIn
-    ? onScreen
-      ? `Burn this exact text clearly onto the video (large, readable, lower-third or center, high contrast): "${onScreen}".`
-      : ""
-    : "Do not burn any captions, titles, or watermarks onto the video.";
+  if (onScreen && !/visual focus/i.test(cleaned)) {
+    cleaned = `${cleaned} Visual focus (no text overlay): ${onScreen}.`;
+  }
 
-  return [cleaned, burnLine].filter(Boolean).join(" ").slice(0, 1800);
+  return `${cleaned} Do not burn any captions, titles, watermarks, or on-screen text onto the video.`
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 1800);
 }
 
-/**
- * Text that should go on the clipboard / into the platform description box.
- * Never the full HOOK/BEAT talk track when a labeled script is present.
- */
 export function extractShareCaption(raw: string, platform: Platform): string {
-  const text = (raw || "").trim();
+  const text = sanitizeClientCopy(raw || "").trim();
   if (!text) return "";
   if (!FILM_PLATFORMS.includes(platform)) return text;
 
@@ -246,16 +312,18 @@ export function extractShareCaption(raw: string, platform: Platform): string {
   return text;
 }
 
-/** Upsert CAPTION: / IMAGINE: / ON_SCREEN: into a platform script. */
 export function mergeFilmEditsIntoScript(
   raw: string,
   edits: { caption?: string; imagine?: string; onScreen?: string },
   film: FilmGuide | null
 ): string {
   const text = (raw || "").trim();
-  const caption = (edits.caption ?? film?.caption ?? "").trim();
-  const imagine = (edits.imagine ?? film?.imagine ?? "").trim();
-  const onScreen = (edits.onScreen ?? film?.onScreen ?? "").trim();
+  const caption = sanitizeClientCopy(edits.caption ?? film?.caption ?? "");
+  const imagine = sanitizeClientCopy(edits.imagine ?? film?.imagine ?? "");
+  const onScreen = sanitizeClientCopy(edits.onScreen ?? film?.onScreen ?? "")
+    .split(/\s+/)
+    .slice(0, 8)
+    .join(" ");
 
   if (!text && !caption && !imagine) return "";
 
@@ -300,11 +368,25 @@ export function mergeFilmEditsIntoScript(
     return block.join("\n");
   }
 
-  if (!sawOnScreen && onScreen) {
-    // Insert after beats / hook when possible — append is fine
-    out.push(`ON_SCREEN: ${onScreen}`);
-  }
+  if (!sawOnScreen && onScreen) out.push(`ON_SCREEN: ${onScreen}`);
   if (!sawImagine && imagine) out.push(`IMAGINE: ${imagine}`);
   if (!sawCaption && caption) out.push(`CAPTION: ${caption}`);
   return out.join("\n").trim();
+}
+
+/** Preview wrap for the Drafts UI (matches hub overlay). */
+export function previewOverlayLines(text: string, maxChars = 18): string[] {
+  const words = sanitizeClientCopy(text).split(/\s+/).filter(Boolean).slice(0, 8);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length > maxChars && cur) {
+      lines.push(cur);
+      cur = w;
+      if (lines.length >= 3) break;
+    } else cur = next;
+  }
+  if (cur && lines.length < 3) lines.push(cur);
+  return lines.slice(0, 3);
 }

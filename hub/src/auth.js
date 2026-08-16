@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { db, bootstrapUser, ensureRefCode } from "./db.js";
+import { formatAuthMail, mailConfigured, notifyOwner, recordAuthEvent, shouldNotifyLogin } from "./mail.js";
 
 const now = () => new Date().toISOString();
 
@@ -50,16 +51,22 @@ export function destroySession(token) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export function signup(email, password, refCode) {
+export function signup(email, password, refCode, { termsAccepted } = {}) {
   email = (email || "").trim().toLowerCase();
   password = password || "";
   if (!EMAIL_RE.test(email)) throw httpError(400, "Enter a valid email address.");
   if (password.length < 8) throw httpError(400, "Password must be at least 8 characters.");
+  if (!termsAccepted) {
+    throw httpError(400, "Please agree to the Terms of Service and Privacy Policy.");
+  }
   const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
   if (existing) throw httpError(409, "An account with that email already exists. Sign in instead.");
+  const ts = now();
   const info = db
-    .prepare("INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)")
-    .run(email, hashPassword(password), now());
+    .prepare(
+      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at) VALUES (?, ?, ?, ?)"
+    )
+    .run(email, hashPassword(password), ts, ts);
   const userId = Number(info.lastInsertRowid);
   bootstrapUser(userId);
   applyReferral(userId, refCode);
@@ -84,38 +91,108 @@ export function applyReferral(newUserId, refCode) {
 
 export function login(email, password) {
   email = (email || "").trim().toLowerCase();
-  const user = db.prepare("SELECT id, email, password_hash FROM users WHERE email = ?").get(email);
+  const user = db
+    .prepare("SELECT id, email, password_hash, disabled_at FROM users WHERE email = ?")
+    .get(email);
   if (user && user.id !== 1 && !user.password_hash) {
     throw httpError(400, "This account uses Google sign-in - tap Continue with Google.");
   }
   if (!user || !verifyPassword(password || "", user.password_hash)) {
     throw httpError(401, "Wrong email or password.");
   }
+  if (user.disabled_at) throw httpError(403, "This account has been disabled.");
   return { id: user.id, email: user.email };
 }
 
 export function getUser(userId) {
   const user = db
     .prepare(
-      "SELECT id, email, tier, bonus_drafts, stripe_customer_id, stripe_subscription_id, created_at FROM users WHERE id = ?"
+      `SELECT id, email, tier, bonus_drafts, COALESCE(video_credits, 0) AS video_credits,
+              stripe_customer_id, stripe_subscription_id, created_at,
+              terms_accepted_at, disabled_at
+       FROM users WHERE id = ?`
     )
     .get(userId);
   if (user) user.ref_code = ensureRefCode(userId);
   return user;
 }
 
+export function assertUserActive(userId) {
+  const row = db.prepare("SELECT disabled_at FROM users WHERE id = ?").get(userId);
+  if (row?.disabled_at) {
+    const err = new Error("This account has been disabled.");
+    err.status = 403;
+    throw err;
+  }
+}
+
+export function acceptTerms(userId) {
+  db.prepare("UPDATE users SET terms_accepted_at = COALESCE(terms_accepted_at, ?) WHERE id = ?").run(
+    now(),
+    userId
+  );
+}
+
+export function setUserDisabled(userId, disabled) {
+  if (disabled) {
+    db.prepare("UPDATE users SET disabled_at = ? WHERE id = ?").run(now(), userId);
+  } else {
+    db.prepare("UPDATE users SET disabled_at = NULL WHERE id = ?").run(userId);
+  }
+}
+
 // Google-verified email: link to the existing account or create a
 // password-less one (they'll always sign in via Google).
-export function findOrCreateGoogleUser(email) {
+export function findOrCreateGoogleUser(email, { refCode } = {}) {
   email = email.trim().toLowerCase();
-  const existing = db.prepare("SELECT id, email FROM users WHERE email = ?").get(email);
-  if (existing) return existing;
+  const existing = db
+    .prepare("SELECT id, email, disabled_at FROM users WHERE email = ?")
+    .get(email);
+  if (existing) {
+    if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
+    return { id: existing.id, email: existing.email, created: false };
+  }
+  const ts = now();
   const info = db
-    .prepare("INSERT INTO users (email, password_hash, created_at) VALUES (?, NULL, ?)")
-    .run(email, now());
+    .prepare(
+      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at) VALUES (?, NULL, ?, ?)"
+    )
+    .run(email, ts, ts);
   const userId = Number(info.lastInsertRowid);
   bootstrapUser(userId);
-  return { id: userId, email };
+  applyReferral(userId, refCode);
+  return { id: userId, email, created: true };
+}
+
+/** Persist email list + last login, then ping ops inbox (non-blocking). */
+export function noteAuthEvent({ userId, email, method, isNew }) {
+  const payload = recordAuthEvent({ userId, email, method, isNew });
+  if (!payload) return;
+  const ts = payload.ts;
+  db.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").run(ts, userId);
+  const existing = db.prepare("SELECT * FROM contacts WHERE email = ?").get(payload.email);
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO contacts (email, user_id, source, first_seen_at, last_login_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(payload.email, userId, payload.source, ts, ts);
+  } else {
+    db.prepare(
+      "UPDATE contacts SET user_id = ?, last_login_at = ?, source = COALESCE(source, ?) WHERE email = ?"
+    ).run(userId, ts, payload.source, payload.email);
+  }
+  const contact = db.prepare("SELECT last_notified_at FROM contacts WHERE email = ?").get(payload.email);
+  if (!shouldNotifyLogin(contact?.last_notified_at, payload.isNew)) return;
+  if (!mailConfigured()) return;
+  const mail = formatAuthMail(payload);
+  void notifyOwner(mail).then((ok) => {
+    if (ok) {
+      db.prepare("UPDATE contacts SET last_notified_at = ? WHERE email = ?").run(
+        new Date().toISOString(),
+        payload.email
+      );
+    }
+  });
 }
 
 function httpError(status, message) {

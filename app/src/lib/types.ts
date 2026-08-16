@@ -28,6 +28,8 @@ export interface BrandTraits {
   cta_preference?: string;
   /** ISO-ish code from OUTPUT_LANGUAGES — drafts are generated in this language. */
   preferred_language?: string;
+  /** Caption LLM: claude | grok (default grok). */
+  text_provider?: "claude" | "grok";
 }
 
 export interface Profile {
@@ -35,6 +37,8 @@ export interface Profile {
   projects: string;
   brand_voice: string;
   traits?: BrandTraits;
+  /** Custom logo/mark uploaded via Brand Brain (/media/…). */
+  watermark_media_url?: string | null;
 }
 
 export type Tier = "free" | "creator" | "studio";
@@ -47,9 +51,40 @@ export interface Me {
   referrals: number;
   drafts_used: number;
   drafts_limit: number;
+  stills_used?: number;
+  stills_limit?: number;
+  videos_used?: number;
+  videos_included?: number;
+  video_credits?: number;
+  videos_remaining?: number;
   billing_configured?: boolean;
+  credits_checkout?: boolean;
   has_stripe_customer?: boolean;
+  terms_accepted_at?: string | null;
 }
+
+export type ImagineStatus = {
+  configured: boolean;
+  tier: string;
+  studio: boolean;
+  creator?: boolean;
+  used: number;
+  limit: number;
+  stills: { used: number; limit: number; remaining: number; tier: string };
+  videos: {
+    used: number;
+    included: number;
+    included_remaining: number;
+    credits: number;
+    remaining: number;
+    limit: number;
+    tier: string;
+  };
+  voices?: {
+    configured: boolean;
+    voices: { id: string; label: string; vibe?: string; example?: string }[];
+  };
+};
 
 export interface Idea {
   id: number;
@@ -69,6 +104,10 @@ export interface Draft {
   status: "draft" | "approved" | "posted";
   source: "user" | "agent";
   media_url: string | null;
+  /** Capture/source media before Imagine still/edit/video. */
+  original_media_url?: string | null;
+  media_mime?: string | null;
+  original_media_mime?: string | null;
   created_at: string;
 }
 
@@ -81,6 +120,7 @@ export interface ImagineJob {
   prompt: string;
   error: string | null;
   media_url: string | null;
+  watermark?: boolean;
   created_at: string;
   updated_at: string;
 }

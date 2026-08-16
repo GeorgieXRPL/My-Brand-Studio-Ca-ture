@@ -3,11 +3,9 @@
 
 import Stripe from "stripe";
 import { db } from "./db.js";
+import { PLAN_PRICES, VIDEO_CREDIT_PACKS, planFeatures } from "./plans.js";
 
-export const PLAN_PRICES = {
-  creator: { monthly: 19, label: "Creator" },
-  studio: { monthly: 49, label: "Studio" },
-};
+export { PLAN_PRICES };
 
 const TIER_FROM_PRICE = new Map();
 
@@ -28,6 +26,11 @@ export function billingConfigured() {
   return Boolean(process.env.STRIPE_SECRET_KEY && priceEnv("creator") && priceEnv("studio"));
 }
 
+/** One-time credit packs only need the secret key (uses price_data). */
+export function creditsCheckoutConfigured() {
+  return Boolean(process.env.STRIPE_SECRET_KEY);
+}
+
 function stripe() {
   if (!process.env.STRIPE_SECRET_KEY) {
     const err = new Error("Billing is not configured yet.");
@@ -40,10 +43,24 @@ function stripe() {
 function appOrigin(req) {
   const fromEnv = (process.env.APP_ORIGIN || process.env.APP_URL || "").replace(/\/$/, "");
   if (fromEnv) return fromEnv;
-  // Never trust client Origin for Stripe return URLs.
   const err = new Error("APP_ORIGIN is not configured on the hub.");
   err.status = 503;
   throw err;
+}
+
+async function ensureCustomer(userId, email) {
+  const s = stripe();
+  const row = db.prepare("SELECT stripe_customer_id FROM users WHERE id = ?").get(userId);
+  let customerId = row?.stripe_customer_id || undefined;
+  if (!customerId) {
+    const customer = await s.customers.create({
+      email: email || undefined,
+      metadata: { brand_studio_user_id: String(userId) },
+    });
+    customerId = customer.id;
+    db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(customerId, userId);
+  }
+  return customerId;
 }
 
 export async function createCheckoutSession({ userId, email, tier, req }) {
@@ -59,16 +76,7 @@ export async function createCheckoutSession({ userId, email, tier, req }) {
   }
   const priceId = priceEnv(tier);
   const s = stripe();
-  const row = db.prepare("SELECT stripe_customer_id FROM users WHERE id = ?").get(userId);
-  let customerId = row?.stripe_customer_id || undefined;
-  if (!customerId) {
-    const customer = await s.customers.create({
-      email: email || undefined,
-      metadata: { brand_studio_user_id: String(userId) },
-    });
-    customerId = customer.id;
-    db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(customerId, userId);
-  }
+  const customerId = await ensureCustomer(userId, email);
   const origin = appOrigin(req);
   const session = await s.checkout.sessions.create({
     mode: "subscription",
@@ -82,6 +90,75 @@ export async function createCheckoutSession({ userId, email, tier, req }) {
     allow_promotion_codes: true,
   });
   return { url: session.url };
+}
+
+export async function createCreditsCheckoutSession({ userId, email, pack, req }) {
+  const packKey = String(pack || "");
+  const def = VIDEO_CREDIT_PACKS[packKey];
+  if (!def) {
+    const err = new Error("Pick a credit pack: 5, 15, or 40.");
+    err.status = 400;
+    throw err;
+  }
+  if (!creditsCheckoutConfigured()) {
+    const err = new Error("Credit checkout isn't live yet. Email hello@brand-studio.app.");
+    err.status = 503;
+    throw err;
+  }
+  const s = stripe();
+  const customerId = await ensureCustomer(userId, email);
+  const origin = appOrigin(req);
+  const session = await s.checkout.sessions.create({
+    mode: "payment",
+    customer: customerId,
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: Math.round(def.usd * 100),
+          product_data: {
+            name: def.label,
+            description: `${def.credits} Grok Imagine video credits for Brand Studio`,
+          },
+        },
+      },
+    ],
+    success_url: `${origin}/setup?billing=credits_success`,
+    cancel_url: `${origin}/setup?billing=cancel`,
+    client_reference_id: String(userId),
+    metadata: {
+      user_id: String(userId),
+      type: "video_credits",
+      credits: String(def.credits),
+      pack: packKey,
+    },
+  });
+  return { url: session.url };
+}
+
+export function addVideoCredits(userId, credits) {
+  const n = Math.max(0, Math.floor(Number(credits) || 0));
+  if (!n) return getVideoCredits(userId);
+  db.prepare("UPDATE users SET video_credits = COALESCE(video_credits, 0) + ? WHERE id = ?").run(n, userId);
+  return getVideoCredits(userId);
+}
+
+export function getVideoCredits(userId) {
+  return db.prepare("SELECT COALESCE(video_credits, 0) AS n FROM users WHERE id = ?").get(userId)?.n || 0;
+}
+
+/** Burn one purchased credit. Returns false if none left. */
+export function consumeVideoCredit(userId) {
+  const info = db
+    .prepare("UPDATE users SET video_credits = video_credits - 1 WHERE id = ? AND video_credits > 0")
+    .run(userId);
+  return info.changes > 0;
+}
+
+/** Restore one purchased credit (failed / aborted generation). */
+export function refundVideoCredit(userId) {
+  db.prepare("UPDATE users SET video_credits = COALESCE(video_credits, 0) + 1 WHERE id = ?").run(userId);
 }
 
 export async function createPortalSession({ userId, req }) {
@@ -106,8 +183,6 @@ export async function createPortalSession({ userId, req }) {
 
 function setUserTier(userId, tier, subscriptionId = undefined) {
   if (!["free", "creator", "studio"].includes(tier)) return;
-  // Pass subscriptionId explicitly (including null on cancel) so we clear stale ids.
-  // Omit the arg (undefined) to leave stripe_subscription_id unchanged.
   if (subscriptionId === undefined) {
     db.prepare("UPDATE users SET tier = ? WHERE id = ?").run(tier, userId);
   } else {
@@ -142,11 +217,16 @@ export async function handleStripeWebhook(rawBody, signature) {
     case "checkout.session.completed": {
       const session = event.data.object;
       const userId = Number(session.client_reference_id || session.metadata?.user_id);
+      if (session.customer && userId) {
+        db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(session.customer, userId);
+      }
+      if (session.mode === "payment" && session.metadata?.type === "video_credits" && userId) {
+        const credits = Number(session.metadata.credits || 0);
+        if (credits > 0) addVideoCredits(userId, credits);
+        break;
+      }
       const tier = session.metadata?.tier;
       if (userId && (tier === "creator" || tier === "studio")) {
-        if (session.customer) {
-          db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(session.customer, userId);
-        }
         setUserTier(userId, tier, session.subscription || null);
       }
       break;
@@ -182,27 +262,13 @@ export async function handleStripeWebhook(rawBody, signature) {
 }
 
 export function billingStatus() {
+  const plans = planFeatures();
   return {
     configured: billingConfigured(),
-    plans: {
-      free: { monthly: 0, drafts: 10, features: ["Share to any app", "10 drafts / month"] },
-      creator: {
-        monthly: PLAN_PRICES.creator.monthly,
-        drafts: 200,
-        features: ["Guided Share", "Content schedule", "Growth tips", "200 drafts / month"],
-      },
-      studio: {
-        monthly: PLAN_PRICES.studio.monthly,
-        drafts: 1000,
-        features: [
-          "Everything in Creator",
-          "AI clip & still (Grok Imagine)",
-          "AI agents",
-          "Self-hosted hub",
-          "1000 drafts / month",
-          "One-tap Post & live metrics — coming soon",
-        ],
-      },
-    },
+    credits_checkout: creditsCheckoutConfigured(),
+    credit_packs: Object.fromEntries(
+      Object.entries(VIDEO_CREDIT_PACKS).map(([k, v]) => [k, { credits: v.credits, usd: v.usd, label: v.label }])
+    ),
+    plans,
   };
 }

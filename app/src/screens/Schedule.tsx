@@ -8,13 +8,18 @@ import {
   PLATFORMS,
   PLATFORM_LABELS,
   type Draft,
-  type Me,
   type Platform,
   type ScheduleBlock,
   type ScheduledPost,
 } from "../lib/types";
-import { PLAN_COPY, tierAtLeast } from "../lib/plans";
 import { useT } from "../lib/i18n";
+import {
+  addReminder,
+  cancelReminder,
+  ensureNotifyPermission,
+  listReminders,
+  type PostReminder,
+} from "../lib/postReminders";
 
 const DAY_NAMES = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const DAY_SHORT = ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -112,7 +117,6 @@ export default function Schedule() {
   const [blocks, setBlocks] = useState<ScheduleBlock[]>([]);
   const [scheduled, setScheduled] = useState<ScheduledPost[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [me, setMe] = useState<Me | null>(null);
   const [view, setView] = useState<View>(initialView);
   const [focusDay, setFocusDay] = useState(todayWeekday);
   const [loading, setLoading] = useState(true);
@@ -123,6 +127,7 @@ export default function Schedule() {
   const [contentForm, setContentForm] = useState<ContentForm | null>(null);
   const [saving, setSaving] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [reminders, setReminders] = useState<PostReminder[]>(() => listReminders());
   const configured = isConfigured();
   const today = todayWeekday();
 
@@ -130,6 +135,17 @@ export default function Schedule() {
     if (configured) load();
     else setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setReminders(listReminders());
+    refresh();
+    window.addEventListener("focus", refresh);
+    window.addEventListener("post-reminders-changed", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("post-reminders-changed", refresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -145,16 +161,15 @@ export default function Schedule() {
 
   async function load() {
     try {
-      const [sched, queue, draftRows, account] = await Promise.all([
+      const [sched, queue, draftRows] = await Promise.all([
         api.getSchedule(),
         api.getScheduledPosts().catch(() => [] as ScheduledPost[]),
         api.getDrafts().catch(() => [] as Draft[]),
-        api.me().catch(() => null),
       ]);
       setBlocks(sched);
       setScheduled(queue);
       setDrafts(draftRows);
-      setMe(account);
+      setReminders(listReminders());
       setError("");
     } catch (e: any) {
       setError(e.message);
@@ -168,12 +183,14 @@ export default function Schedule() {
     [drafts]
   );
 
-  const upcoming = scheduled.filter((s) => s.status === "scheduled" || s.status === "publishing").length;
+  const upcomingReminders = reminders.length;
+  const upcoming = scheduled.filter((s) => s.status === "scheduled" || s.status === "publishing").length + upcomingReminders;
   const dayContent = scheduled.filter(
     (sp) =>
       (sp.status === "scheduled" || sp.status === "failed" || sp.status === "publishing") &&
       weekdayOf(sp.scheduled_at) === focusDay
   );
+  const dayReminders = reminders.filter((r) => weekdayOf(r.scheduledAt) === focusDay);
 
   async function toggle(b: ScheduleBlock) {
     setBlocks((prev) => prev.map((x) => (x.id === b.id ? { ...x, done: x.done ? 0 : 1 } : x)));
@@ -247,14 +264,15 @@ export default function Schedule() {
   }
 
   function openContentScheduler(draft?: Draft) {
-    if (!tierAtLeast(me?.tier, "creator")) {
-      toast(t("Creator ({price}) unlocks the content queue", { price: PLAN_COPY.creator.price }));
+    if (!configured) {
+      toast(t("Sign in on the Setup tab to manage your schedule."));
       navigate("/setup");
       return;
     }
     const d = draft || schedulableDrafts[0];
     if (!d) {
       toast(t("Create a draft first, then come back to schedule it"));
+      navigate("/capture");
       return;
     }
     const plats = platformsForDraft(d);
@@ -316,18 +334,33 @@ export default function Schedule() {
 
   async function saveContentSchedule() {
     if (!contentForm) return;
+    const draft = schedulableDrafts.find((d) => d.id === contentForm.draftId);
+    if (!draft) return;
     setSaving(true);
     try {
-      await api.schedulePost(contentForm.draftId, contentForm.platform, new Date(contentForm.scheduledAt).toISOString());
-      toast(t("Queued for {platform}", { platform: PLATFORM_LABELS[contentForm.platform] }));
+      await ensureNotifyPermission();
+      addReminder({
+        draftId: draft.id,
+        platform: contentForm.platform,
+        scheduledAt: contentForm.scheduledAt,
+        topic: draft.topic || `Draft #${draft.id}`,
+        preview: previewFor(draft, contentForm.platform),
+      });
+      setReminders(listReminders());
+      toast(t("Reminder set — we'll nudge you to Share at that time"));
       setContentForm(null);
       switchView("content");
-      load();
     } catch (e: any) {
       toast(e.message);
     } finally {
       setSaving(false);
     }
+  }
+
+  function removeReminder(id: string) {
+    cancelReminder(id);
+    setReminders(listReminders());
+    toast(t("Cancelled"));
   }
 
   async function cancelScheduled(sp: ScheduledPost) {
@@ -452,9 +485,9 @@ export default function Schedule() {
       {contentForm && (
         <div className="sheet-overlay" onClick={() => !saving && setContentForm(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
-            <div className="sheet-title">{t("Schedule a draft")}</div>
+            <div className="sheet-title">{t("Plan a Share reminder")}</div>
             <p className="card-desc" style={{ marginTop: 0 }}>
-              {t("Pick a draft, platform, and go-live time. Auto-post needs a linked account (X on Creator+). Until then, use Share from Drafts.")}
+              {t("Pick a draft, platform, and time. We'll remind you to Share — auto-post when account linking is ready.")}
             </p>
             <label>{t("Draft")}</label>
             {schedulableDrafts.length === 0 ? (
@@ -526,7 +559,7 @@ export default function Schedule() {
               disabled={saving || !selectedDraft || !contentForm.scheduledAt}
             >
               <ClockIcon size={16} />
-              {saving ? t("Scheduling…") : t("Add to content queue")}
+              {saving ? t("Saving…") : t("Set reminder")}
             </button>
           </div>
         </div>
@@ -609,9 +642,10 @@ export default function Schedule() {
                 {[1, 2, 3, 4, 5, 6, 7].map((d) => {
                   const n = byDay(d).length;
                   const done = byDay(d).filter((b) => b.done).length;
-                  const postsN = scheduled.filter(
-                    (sp) => sp.status === "scheduled" && weekdayOf(sp.scheduled_at) === d
-                  ).length;
+                  const postsN =
+                    scheduled.filter(
+                      (sp) => sp.status === "scheduled" && weekdayOf(sp.scheduled_at) === d
+                    ).length + reminders.filter((r) => weekdayOf(r.scheduledAt) === d).length;
                   return (
                     <button
                       key={d}
@@ -683,9 +717,28 @@ export default function Schedule() {
                 </div>
               )}
 
-              {dayContent.length > 0 && (
+              {(dayContent.length > 0 || dayReminders.length > 0) && (
                 <>
-                  <p className="section-label">{t("Content going out")}</p>
+                  <p className="section-label">{t("Share reminders")}</p>
+                  {dayReminders.map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      className="card sched-post sched-post-mini"
+                      onClick={() => switchView("content")}
+                    >
+                      <div className="row between">
+                        <span>
+                          <i className="sdot scheduled" />
+                          <b>{r.topic || t("Draft #{id}", { id: r.draftId })}</b>
+                        </span>
+                        <span className="muted small">{PLATFORM_LABELS[r.platform]}</span>
+                      </div>
+                      <div className="muted small" style={{ marginTop: 4 }}>
+                        {formatWhen(r.scheduledAt)} · {t("reminder")}
+                      </div>
+                    </button>
+                  ))}
                   {dayContent.map((sp) => (
                     <button
                       key={sp.id}
@@ -724,7 +777,7 @@ export default function Schedule() {
                 onClick={() => openContentScheduler()}
               >
                 <ClockIcon size={16} />
-                {t("Schedule a draft to post")}
+                {t("Set a Share reminder")}
               </button>
 
               <div className="row" style={{ marginTop: 14, gap: 8 }}>
@@ -745,14 +798,14 @@ export default function Schedule() {
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-title">
               <ClockIcon size={18} />
-              {t("Content scheduler")}
+              {t("Share reminders")}
             </div>
             <p className="card-desc">
-              {t("Queue drafts to publish at a set time. Your daily plan (filming, editing) stays on the Daily tab.")}
+              {t("Plan when a draft should go live. We'll pop up a reminder to Share — official auto-post is coming soon.")}
             </p>
             <button type="button" className="btn primary block" onClick={() => openContentScheduler()}>
               <PlusIcon size={16} />
-              {t("Schedule a draft")}
+              {t("Plan a Share reminder")}
             </button>
             {schedulableDrafts.length === 0 && (
               <p className="muted small" style={{ marginTop: 10, textAlign: "center" }}>
@@ -764,7 +817,7 @@ export default function Schedule() {
 
           <div className="dot-legend">
             <span>
-              <i className="sdot scheduled" /> {t("scheduled")}
+              <i className="sdot scheduled" /> {t("reminder")}
             </span>
             <span>
               <i className="sdot posted" /> {t("posted")}
@@ -774,13 +827,38 @@ export default function Schedule() {
             </span>
           </div>
 
-          {scheduled.length === 0 && (
+          {reminders.length === 0 && scheduled.length === 0 && (
             <div className="empty-spark">
               <Spark size={56} mood="thinking" />
-              <b>{t("No content in the queue")}</b>
-              <p>{t("Schedule a draft above, or use the clock on any draft in Drafts.")}</p>
+              <b>{t("No Share reminders yet")}</b>
+              <p>{t("Pick a draft above — we'll nudge you when it's time to post.")}</p>
             </div>
           )}
+
+          {reminders.map((r) => (
+            <div className="card sched-post" key={r.id}>
+              <div className="row between" style={{ alignItems: "flex-start", gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <i className="sdot scheduled" />
+                    <b className="sched-post-topic">{r.topic || t("Draft #{id}", { id: r.draftId })}</b>
+                  </div>
+                  <div className="muted small" style={{ marginTop: 4 }}>
+                    {PLATFORM_LABELS[r.platform] || r.platform} · {formatWhen(r.scheduledAt)} · {t("Share reminder")}
+                  </div>
+                  {r.preview && <p className="sched-post-preview">{r.preview}</p>}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch" }}>
+                  <button type="button" className="btn ghost sm" onClick={() => removeReminder(r.id)}>
+                    {t("Cancel")}
+                  </button>
+                  <Link className="btn ghost sm" to={`/drafts?focus=${r.draftId}`}>
+                    {t("Open")}
+                  </Link>
+                </div>
+              </div>
+            </div>
+          ))}
 
           {scheduled.map((sp) => (
             <div className="card sched-post" key={sp.id}>

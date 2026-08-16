@@ -23,30 +23,34 @@ function getSteps(t: (s: string) => string): Step[] {
   return [
     {
       selector: '[data-tour="mic"]',
-      title: t("Talk, don't type"),
+      title: t("Talk it out"),
       text: t(
-        "Tap the mic and say your idea out loud. Brand Studio turns it into ready-to-post content for X, Facebook, TikTok, Snapchat, Instagram and LinkedIn — in your voice."
+        "You know what you mean — the blank caption box is the hard part. Tap the mic, speak naturally, and we'll shape it into posts that still sound like you."
       ),
     },
     {
       selector: '[data-tour="nav-drafts"]',
-      title: t("Review your drafts"),
-      text: t("Every generated post lands here. Tap Edit to tweak, then Share — or Mark posted when you've shipped it."),
+      title: t("Make them yours"),
+      text: t(
+        "Every draft lands here. Tap Share — your phone's share sheet opens. Pick Instagram or TikTok, then paste the caption (we copy it because most apps drop it)."
+      ),
     },
     {
       selector: '[data-tour="nav-schedule"]',
-      title: t("Plan days & queue posts"),
-      text: t("Daily is your filming/editing rhythm. Content is for planning when drafts go live — Share works anytime."),
+      title: t("Plan days & reminders"),
+      text: t("Daily is your filming/editing rhythm. Content is for Share reminders when a draft should go live."),
     },
     {
       selector: '[data-tour="nav-insights"]',
-      title: t("Grow smarter each week"),
-      text: t("Weekly AI tips based on your drafts and brand. Live platform metrics are coming soon."),
+      title: t("Grow from what you made"),
+      text: t("Weekly tips based on your drafts and Brand Brain — not generic viral templates. Live metrics are coming soon."),
     },
     {
       selector: '[data-tour="nav-setup"]',
-      title: t("Teach it your brand"),
-      text: t("Set your goals, voice and style in Setup. Share always works — more platform connects are coming soon."),
+      title: t("Teach Brand Brain"),
+      text: t(
+        "Tell it who you talk to, how you sound, and words you never use — so drafts stay yours. Share always works."
+      ),
     },
   ];
 }

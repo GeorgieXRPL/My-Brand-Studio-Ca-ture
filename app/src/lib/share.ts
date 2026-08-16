@@ -1,13 +1,18 @@
 import type { Platform } from "./types";
 import { extractShareCaption, FILM_PLATFORMS } from "./filmHelper";
+import { withBrandTag } from "./attribution";
+
+export type ShareOptions = {
+  /** Account tier — free posts get @MyBStudio attribution. */
+  tier?: string | null;
+};
 
 export async function shareText(text: string): Promise<"shared" | "copied"> {
-  if (navigator.share) {
+  if (typeof navigator.share === "function") {
     try {
       await navigator.share({ text });
       return "shared";
     } catch (err: any) {
-      // User cancelled the share sheet - treat as no-op, don't fall through to copy.
       if (err?.name === "AbortError") return "shared";
     }
   }
@@ -26,8 +31,8 @@ const EXT: Record<string, string> = {
 
 /**
  * Platforms whose native share targets usually accept the PHOTO/VIDEO but
- * drop the caption. We always copy the caption first, then hand over media.
- * (X/Web Share often does the same when files are present — not an API quota issue.)
+ * drop the caption. We copy the caption while the sheet is open, then the
+ * user pastes in the target app.
  */
 const CAPTION_PASTE_PLATFORMS: Platform[] = [
   "instagram",
@@ -38,31 +43,108 @@ const CAPTION_PASTE_PLATFORMS: Platform[] = [
   "linkedin",
 ];
 
+/** Attach text+files last — TikTok often disappears from Android sheets when text is set. */
+const FILES_FIRST_PLATFORMS: Platform[] = ["tiktok", "instagram", "snapchat"];
+
 export type ShareResult =
   | "shared"
   | "shared-caption-ready"
   | "shared-text-only"
-  | "copied";
+  | "copied"
+  | "media-not-ready";
+
+/** In-flight fetches + settled Files so Share can run without network on tap. */
+const mediaInflight = new Map<string, Promise<File | null>>();
+const mediaReady = new Map<string, File | null>();
+
+function sniffMediaMime(bytes: ArrayBuffer, hinted?: string | null): string {
+  if (hinted && EXT[hinted]) return hinted;
+  const u8 = new Uint8Array(bytes.slice(0, 12));
+  if (u8.length >= 8 && u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) {
+    return "video/mp4";
+  }
+  if (u8.length >= 4 && u8[0] === 0x1a && u8[1] === 0x45 && u8[2] === 0xdf && u8[3] === 0xa3) {
+    return "video/webm";
+  }
+  if (u8.length >= 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return "image/jpeg";
+  if (u8.length >= 4 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47) {
+    return "image/png";
+  }
+  if (u8.length >= 6 && u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46) return "image/gif";
+  if (
+    u8.length >= 12 &&
+    u8[0] === 0x52 &&
+    u8[1] === 0x49 &&
+    u8[2] === 0x46 &&
+    u8[3] === 0x46 &&
+    u8[8] === 0x57 &&
+    u8[9] === 0x45 &&
+    u8[10] === 0x42 &&
+    u8[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return hinted || "application/octet-stream";
+}
 
 async function fetchMediaFile(mediaUrl: string): Promise<File | null> {
   try {
     const res = await fetch(mediaUrl);
     if (!res.ok) return null;
-    const blob = await res.blob();
-    const mime = blob.type || "image/jpeg";
-    return new File([blob], `brand-studio.${EXT[mime] || "bin"}`, { type: mime });
+    const buf = await res.arrayBuffer();
+    const headerType = (res.headers.get("content-type") || "").split(";")[0].trim();
+    const mime = sniffMediaMime(buf, headerType);
+    const ext = EXT[mime] || (mime.startsWith("video/") ? "mp4" : "bin");
+    const base = mime.startsWith("video/") ? "clip" : "photo";
+    return new File([buf], `${base}.${ext}`, { type: mime });
   } catch {
     return null;
   }
 }
 
-async function tryShareFiles(file: File, text: string): Promise<boolean> {
-  if (!navigator.share) return false;
-  const payloads: ShareData[] = [
+/** Warm the file cache before the user taps Share (required on iOS). */
+export function prefetchShareMedia(mediaUrl?: string | null): Promise<File | null> {
+  if (!mediaUrl) return Promise.resolve(null);
+  if (mediaReady.has(mediaUrl)) return Promise.resolve(mediaReady.get(mediaUrl) ?? null);
+  let pending = mediaInflight.get(mediaUrl);
+  if (!pending) {
+    pending = fetchMediaFile(mediaUrl).then((file) => {
+      mediaReady.set(mediaUrl, file);
+      mediaInflight.delete(mediaUrl);
+      return file;
+    });
+    mediaInflight.set(mediaUrl, pending);
+  }
+  return pending;
+}
+
+/** Clear cache so a regenerated clip is re-fetched. */
+export function clearPrefetchedShareMedia(mediaUrl?: string | null) {
+  if (!mediaUrl) {
+    mediaReady.clear();
+    mediaInflight.clear();
+    return;
+  }
+  mediaReady.delete(mediaUrl);
+  mediaInflight.delete(mediaUrl);
+}
+
+/** Sync peek — File only if prefetch already finished. */
+export function getPrefetchedShareMedia(mediaUrl?: string | null): File | null {
+  if (!mediaUrl) return null;
+  return mediaReady.get(mediaUrl) ?? null;
+}
+
+async function tryShareFiles(file: File, text: string, filesFirst: boolean): Promise<boolean> {
+  if (typeof navigator.share !== "function") return false;
+  const withText: ShareData[] = [
     { files: [file], text, title: text.slice(0, 80) },
     { files: [file], text },
-    { files: [file] },
   ];
+  const filesOnly: ShareData = { files: [file] };
+  const payloads: ShareData[] = filesFirst
+    ? [filesOnly, ...withText]
+    : [...withText, filesOnly];
   for (const payload of payloads) {
     try {
       if (navigator.canShare && !navigator.canShare(payload)) continue;
@@ -75,44 +157,66 @@ async function tryShareFiles(file: File, text: string): Promise<boolean> {
   return false;
 }
 
+/** Trigger a same-tab download of a prefetched File (TikTok upload fallback). */
+export function downloadShareFile(file: File) {
+  const url = URL.createObjectURL(file);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = file.name || "clip.mp4";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 /**
- * Share for a specific platform. With media we use a caption-first flow so
- * Instagram / TikTok / Snapchat / X don't leave the user without their text:
- * 1) copy caption to clipboard  2) open share sheet with the file  3) user pastes.
+ * Share for a specific platform. With media:
+ * 1) open share sheet with the file (must stay in the tap gesture on iOS)
+ * 2) copy caption while the sheet is up
+ * 3) user pastes in the target app
  */
 export async function shareForPlatform(
   platform: Platform,
   text: string,
-  mediaUrl?: string | null
+  mediaUrl?: string | null,
+  prefetchedFile?: File | null,
+  options?: ShareOptions
 ): Promise<ShareResult> {
-  // Video platforms: share the post caption, never the full HOOK/BEAT script.
-  const caption = FILM_PLATFORMS.includes(platform)
+  const rawCaption = FILM_PLATFORMS.includes(platform)
     ? extractShareCaption(text, platform)
     : (text || "").trim();
+  const caption = withBrandTag(rawCaption, options?.tier);
   const wantsCaptionPaste = CAPTION_PASTE_PLATFORMS.includes(platform);
+  const filesFirst = FILES_FIRST_PLATFORMS.includes(platform);
 
   if (mediaUrl && typeof navigator.share === "function") {
-    const file = await fetchMediaFile(mediaUrl);
-    if (file) {
-      if (caption && wantsCaptionPaste) {
-        await copyText(caption);
-        await tryShareFiles(file, caption);
-        // Caption is on the clipboard either way — paste after picking the app.
-        return "shared-caption-ready";
-      }
-      const ok = await tryShareFiles(file, caption);
-      if (ok) return "shared";
+    const file = prefetchedFile ?? getPrefetchedShareMedia(mediaUrl);
+    if (!file) {
+      void prefetchShareMedia(mediaUrl);
+      return "media-not-ready";
     }
-    // Media couldn't attach — fall through to text.
-    const result = await shareText(caption);
-    return result === "shared" ? "shared-text-only" : "copied";
+
+    if (caption && wantsCaptionPaste) {
+      const sharePromise = tryShareFiles(file, caption, filesFirst);
+      try {
+        await copyText(caption);
+      } catch {
+        /* sheet still matters more than clipboard */
+      }
+      const ok = await sharePromise;
+      if (ok) return "shared-caption-ready";
+      return "copied";
+    }
+    const ok = await tryShareFiles(file, caption, filesFirst);
+    if (ok) return "shared";
+    return "copied";
   }
 
   if (!mediaUrl) {
     return shareText(caption);
   }
 
-  // No Web Share API: copy caption so they can paste after picking the photo manually.
   if (caption) await copyText(caption);
   return "copied";
 }
@@ -129,9 +233,11 @@ export function shareToastMessage(result: ShareResult, platformLabel?: string): 
   const where = platformLabel || "the app";
   switch (result) {
     case "shared-caption-ready":
-      return `Caption copied — paste it in ${where} after you pick the photo`;
+      return `Caption copied — paste it in ${where} after you pick the video or photo`;
     case "shared-text-only":
-      return "Sharing text — attach the media in the app";
+      return "Sharing text — attach the video in the app if it didn't attach";
+    case "media-not-ready":
+      return "Video still preparing — wait a moment, then open the share sheet again";
     case "copied":
       return `Caption copied — open ${where} and paste it`;
     default:

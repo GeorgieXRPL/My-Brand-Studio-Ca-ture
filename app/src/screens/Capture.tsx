@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, isConfigured } from "../lib/api";
+import GoogleButton from "../lib/GoogleButton";
 import { isVoiceSupported, startlistening, type VoiceController } from "../lib/voice";
 import { useToast } from "../lib/toast";
 import { BulbIcon, CameraIcon, FlameIcon, ImageIcon, MicIcon, SparkIcon, StopIcon, TrashIcon, XCircleIcon } from "../lib/icons";
@@ -8,11 +9,22 @@ import Tour, { shouldShowTour } from "../lib/Tour";
 import Checklist, { dismissChecklist, shouldShowChecklist } from "../lib/Checklist";
 import { queueCelebration } from "../lib/Confetti";
 import CameraCapture from "../lib/CameraCapture";
+import SiriOrb from "../lib/SiriOrb";
 import Spark from "../lib/Spark";
 import { MAX_UPLOAD_BYTES, prepareMedia } from "../lib/media";
 import { speechLocaleFor } from "../lib/languages";
 import { useLocale, useT } from "../lib/i18n";
 import type { Idea, Profile } from "../lib/types";
+
+const INSIGHTS_PROMO_KEY = "bs.insightsPromo.dismissed";
+
+function insightsPromoVisible(): boolean {
+  try {
+    return localStorage.getItem(INSIGHTS_PROMO_KEY) !== "1";
+  } catch {
+    return true;
+  }
+}
 
 // Consecutive days with at least one captured idea, counting back from today/yesterday.
 function captureStreak(ideas: Idea[]): number {
@@ -50,7 +62,32 @@ export default function Capture() {
   const [draftCount, setDraftCount] = useState(0);
   const controller = useRef<VoiceController | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const burstTimer = useRef<number | null>(null);
+  const [orbBurst, setOrbBurst] = useState(false);
+  const [showInsightsPromo, setShowInsightsPromo] = useState(insightsPromoVisible);
+  const [googleAvailable, setGoogleAvailable] = useState(false);
   const configured = isConfigured();
+
+  function dismissInsightsPromo() {
+    try {
+      localStorage.setItem(INSIGHTS_PROMO_KEY, "1");
+    } catch {
+      /* ignore quota / private mode */
+    }
+    setShowInsightsPromo(false);
+  }
+
+  function flashOrb() {
+    setOrbBurst(true);
+    if (burstTimer.current) window.clearTimeout(burstTimer.current);
+    burstTimer.current = window.setTimeout(() => setOrbBurst(false), 700);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (burstTimer.current) window.clearTimeout(burstTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (configured) {
@@ -63,6 +100,7 @@ export default function Capture() {
         })
         .catch(() => {});
     }
+    api.authProviders().then((p) => setGoogleAvailable(p.google)).catch(() => {});
     // Content shared into the app from other apps (Web Share Target).
     const shared = [params.get("title"), params.get("text"), params.get("url")].filter(Boolean).join("\n");
     if (shared) {
@@ -127,6 +165,7 @@ export default function Capture() {
   }
 
   function toggleMic() {
+    flashOrb();
     if (listening) {
       controller.current?.stop();
       return;
@@ -157,6 +196,11 @@ export default function Capture() {
   }
 
   async function saveIdea() {
+    if (!configured) {
+      toast(t("Create a free account on Setup first"));
+      navigate("/setup");
+      return;
+    }
     const value = text.trim();
     if (!value) return;
     try {
@@ -170,12 +214,42 @@ export default function Capture() {
     }
   }
 
+  async function setTextProvider(provider: "claude" | "grok") {
+    if (!profile) {
+      setProfile({
+        goals: "",
+        projects: "",
+        brand_voice: "",
+        traits: { text_provider: provider },
+      });
+      return;
+    }
+    const next: Profile = {
+      ...profile,
+      traits: { ...(profile.traits || {}), text_provider: provider },
+    };
+    setProfile(next);
+    try {
+      await api.saveProfile(next);
+    } catch (e: any) {
+      toast(e.message || t("Couldn't save text AI choice"));
+    }
+  }
+
   async function draftNow(topic: string, ideaId?: number) {
+    if (!configured) {
+      toast(t("Create a free account on Setup first"));
+      navigate("/setup");
+      return;
+    }
     if (!topic.trim()) return;
     setBusy(true);
     try {
+      const textProvider = profile?.traits?.text_provider === "claude" ? "claude" : "grok";
       const draft = await api.generate(
-        ideaId ? { idea_id: ideaId } : { topic, media_url: mediaUrl || undefined }
+        ideaId
+          ? { idea_id: ideaId, text_provider: textProvider }
+          : { topic, media_url: mediaUrl || undefined, text_provider: textProvider }
       );
       setText("");
       setMediaUrl("");
@@ -206,7 +280,7 @@ export default function Capture() {
         <div className="gen-overlay">
           <Spark size={72} mood="thinking" />
           <div className="gen-text">{t("capture.writing")}</div>
-          <div className="gen-sub">X · Facebook · TikTok · Snapchat · Instagram · LinkedIn</div>
+          <div className="gen-sub">{t("Your words · every platform")}</div>
         </div>
       )}
 
@@ -221,7 +295,7 @@ export default function Capture() {
             {t("capture.streak", { n: streak })}
           </span>
         ) : (
-          <span className="sub">{t("capture.sub")} · v2.8.1</span>
+          <span className="sub">{t("capture.sub")}</span>
         )}
       </div>
 
@@ -245,113 +319,153 @@ export default function Capture() {
           <p className="card-desc">{t("capture.welcomeBody")}</p>
           <ol className="welcome-steps">
             <li>{t("Create your free account")}</li>
-            <li>{t("Tell it about your brand (goals, voice)")}</li>
-            <li>{t("Tap the mic and start capturing")}</li>
+            <li>{t("Tell Brand Brain who you talk to — and how you sound")}</li>
+            <li>{t("Tap the mic, tap Draft now, then Share from Drafts")}</li>
           </ol>
+          {googleAvailable && (
+            <div style={{ marginBottom: 10 }}>
+              <GoogleButton />
+            </div>
+          )}
           <Link to="/setup" className="btn primary block" style={{ textDecoration: "none" }}>
-            {t("capture.welcomeCta")}
+            {googleAvailable ? t("Or use email") : t("capture.welcomeCta")}
           </Link>
         </div>
       )}
       {error && <div className="banner error">{error}</div>}
 
       <div className="capture-main">
-        <div className="mic-wrap">
-          <div className={`mic-stage ${listening ? "live" : ""}`}>
-            <span className="mic-ring" />
-            <span className="mic-ring" />
-            <span className="mic-ring" />
-            <button
-              className={`mic ${listening ? "listening" : ""}`}
-              data-tour="mic"
-              onClick={toggleMic}
-              aria-label={listening ? t("Stop listening") : t("Start listening")}
-            >
-              {listening ? <StopIcon size={44} /> : <MicIcon size={52} />}
-            </button>
-          </div>
-          <span className={`mic-hint ${listening ? "live" : ""}`}>
-            {listening ? (
-              <>
-                <span className="wave" aria-hidden="true">
-                  <i /><i /><i /><i /><i />
+        <div className="capture-stack">
+          <div className="mic-wrap">
+            <div className={`mic-stage ${listening ? "live" : ""}`}>
+              <span className="mic-ring" />
+              <span className="mic-ring" />
+              <span className="mic-ring" />
+              <button
+                className={`mic ${listening ? "listening" : ""}`}
+                data-tour="mic"
+                onClick={toggleMic}
+                aria-label={listening ? t("Stop listening") : t("Start listening")}
+              >
+                <SiriOrb live={listening} burst={orbBurst} />
+                <span className="mic-glyph">
+                  {listening ? <StopIcon size={40} /> : <MicIcon size={48} />}
                 </span>
-                {t("capture.listening")}
-              </>
-            ) : (
-              t("capture.tapMic")
-            )}
-          </span>
-        </div>
-
-        <textarea
-          rows={4}
-          placeholder={t("capture.placeholder")}
-          value={interim ? `${text} ${interim}`.trim() : text}
-          onChange={(e) => setText(e.target.value)}
-        />
-
-        <input
-          ref={fileInput}
-          type="file"
-          accept="image/*,video/*"
-          style={{ display: "none" }}
-          onChange={(e) => attachMedia(e.target.files?.[0])}
-        />
-        {mediaUrl ? (
-          <div className="media-preview">
-            {mediaMime.startsWith("video/") ? (
-              <video src={mediaUrl} controls playsInline muted />
-            ) : (
-              <img src={mediaUrl} alt="Attached media" />
-            )}
-            <button
-              className="btn ghost sm"
-              onClick={() => {
-                setMediaUrl("");
-                setMediaMime("");
-              }}
-            >
-              <XCircleIcon size={15} />
-              {t("Remove")}
-            </button>
-          </div>
-        ) : (
-          configured && (
-            <div className="row" style={{ marginTop: 8, gap: 8 }}>
-              <button className="btn ghost sm" onClick={() => setShowCamera(true)} disabled={uploading}>
-                <CameraIcon size={16} />
-                {uploading ? t("Uploading…") : t("Camera")}
-              </button>
-              <button className="btn ghost sm" onClick={() => fileInput.current?.click()} disabled={uploading}>
-                <ImageIcon size={16} />
-                {t("Upload")}
               </button>
             </div>
-          )
-        )}
+            <span className={`mic-hint ${listening ? "live" : ""}`}>
+              {listening ? (
+                <>
+                  <span className="wave" aria-hidden="true">
+                    <i /><i /><i /><i /><i />
+                  </span>
+                  {t("capture.listening")}
+                </>
+              ) : (
+                t("capture.tapMic")
+              )}
+            </span>
+          </div>
 
-        <div className="row" style={{ marginTop: 12 }}>
-          <button className="btn outline block" onClick={saveIdea} disabled={!text.trim() || busy}>
-            {t("capture.saveIdea")}
-          </button>
-          <button className="btn primary block" onClick={() => draftNow(text)} disabled={!text.trim() || busy}>
-            <SparkIcon size={17} />
-            {t("capture.draftNow")}
-          </button>
+          <textarea
+            className="capture-text"
+            rows={4}
+            placeholder={t("capture.placeholder")}
+            value={interim ? `${text} ${interim}`.trim() : text}
+            onChange={(e) => setText(e.target.value)}
+          />
+
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/*,video/*"
+            style={{ display: "none" }}
+            onChange={(e) => attachMedia(e.target.files?.[0])}
+          />
+          {mediaUrl ? (
+            <div className="media-preview">
+              {mediaMime.startsWith("video/") ? (
+                <video src={mediaUrl} controls playsInline muted />
+              ) : (
+                <img src={mediaUrl} alt="Attached media" />
+              )}
+              <button
+                className="btn ghost sm"
+                onClick={() => {
+                  setMediaUrl("");
+                  setMediaMime("");
+                }}
+              >
+                <XCircleIcon size={15} />
+                {t("Remove")}
+              </button>
+            </div>
+          ) : (
+            configured && (
+              <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <button className="btn ghost sm" onClick={() => setShowCamera(true)} disabled={uploading}>
+                  <CameraIcon size={16} />
+                  {uploading ? t("Uploading…") : t("Camera")}
+                </button>
+                <button className="btn ghost sm" onClick={() => fileInput.current?.click()} disabled={uploading}>
+                  <ImageIcon size={16} />
+                  {t("Upload")}
+                </button>
+                <div className="text-provider-seg" role="group" aria-label={t("Who writes drafts")}>
+                  <span className="muted small" style={{ marginRight: 4 }}>
+                    {t("Writer")}
+                  </span>
+                  <button
+                    type="button"
+                    className={`chip-btn ${profile?.traits?.text_provider !== "claude" ? "on" : ""}`}
+                    onClick={() => void setTextProvider("grok")}
+                  >
+                    Grok
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip-btn ${profile?.traits?.text_provider === "claude" ? "on" : ""}`}
+                    onClick={() => void setTextProvider("claude")}
+                  >
+                    Claude
+                  </button>
+                </div>
+              </div>
+            )
+          )}
+
+          <div className="row capture-actions" style={{ marginTop: 12 }}>
+            <button className="btn outline block" onClick={saveIdea} disabled={!text.trim() || busy}>
+              {t("capture.saveIdea")}
+            </button>
+            <button className="btn primary block" onClick={() => draftNow(text)} disabled={!text.trim() || busy}>
+              <SparkIcon size={17} />
+              {t("capture.draftNow")}
+            </button>
+          </div>
         </div>
       </div>
 
-      {configured && (
-        <Link to="/insights" className="insights-link">
-          <BulbIcon size={16} />
-          <span>
-            <b>{t("Content gaps this week")}</b>
-            <span className="muted small" style={{ display: "block" }}>
-              {t("Find topics people search for that nobody covers")}
+      {configured && showInsightsPromo && (
+        <div className="insights-link-wrap">
+          <Link to="/insights" className="insights-link">
+            <BulbIcon size={16} />
+            <span>
+              <b>{t("Content gaps this week")}</b>
+              <span className="muted small" style={{ display: "block" }}>
+                {t("Find topics people search for that nobody covers")}
+              </span>
             </span>
-          </span>
-        </Link>
+          </Link>
+          <button
+            type="button"
+            className="insights-link-dismiss"
+            aria-label={t("Dismiss")}
+            onClick={dismissInsightsPromo}
+          >
+            <XCircleIcon size={18} />
+          </button>
+        </div>
       )}
 
       {openIdeas.length > 0 && (

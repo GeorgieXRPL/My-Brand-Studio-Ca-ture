@@ -19,9 +19,9 @@ import {
   DumbbellIcon,
   GearIcon,
   GiftIcon,
+  ImageIcon,
   KeyIcon,
   PlugIcon,
-  QrIcon,
   SparkIcon,
   UserIcon,
 } from "../lib/icons";
@@ -29,10 +29,12 @@ import QrScanner, { isScanSupported } from "../lib/QrScanner";
 import { resetTour } from "../lib/Tour";
 import { copyText, shareText } from "../lib/share";
 import { getTextScale, MAX_TEXT_SCALE, MIN_TEXT_SCALE, setTextScale } from "../lib/viewportZoom";
-import { PLAN_COPY, tierAtLeast } from "../lib/plans";
+import { PLAN_COPY, VIDEO_CREDIT_PACKS, tierAtLeast } from "../lib/plans";
 import { useLocale } from "../lib/i18n";
 import { OUTPUT_LANGUAGES } from "../lib/languages";
 import { PLATFORM_LABELS, type BrandTraits, type Connections, type Me, type Platform } from "../lib/types";
+import { prepareMedia } from "../lib/media";
+import GoogleButton from "../lib/GoogleButton";
 
 const STYLE_OPTIONS = ["Educational", "Entertaining", "Inspirational", "Behind-the-scenes", "Storytelling", "Contrarian"];
 const TYPE_OPTIONS = ["Short video", "Photo posts", "Threads", "Carousels", "Live/streams", "Long-form"];
@@ -55,16 +57,19 @@ export default function Setup() {
   const [authBusy, setAuthBusy] = useState(false);
   const [signedInAs, setSignedInAs] = useState(isSelfHost() ? "" : getAuthEmail());
 
-  const [showSelfHost, setShowSelfHost] = useState(isSelfHost() || params.get("scan") === "1");
   const [url, setUrl] = useState(isSelfHost() ? getHubUrl() : "");
   const [token, setToken] = useState(getHubToken());
-  const [status, setStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
-  const [scanning, setScanning] = useState(params.get("scan") === "1" && isScanSupported());
+  // Self-hosted pairing UI is Coming soon; only allow scan reconnect if already on a custom hub.
+  const [scanning, setScanning] = useState(
+    isSelfHost() && params.get("scan") === "1" && isScanSupported()
+  );
 
   const [goals, setGoals] = useState("");
   const [projects, setProjects] = useState("");
   const [voice, setVoice] = useState("");
   const [traits, setTraits] = useState<BrandTraits>({});
+  const [watermarkUrl, setWatermarkUrl] = useState<string | null>(null);
+  const [watermarkBusy, setWatermarkBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
 
@@ -72,7 +77,28 @@ export default function Setup() {
   const [me, setMe] = useState<Me | null>(null);
   const [textScale, setTextScaleState] = useState(() => getTextScale());
   const [billingBusy, setBillingBusy] = useState(false);
+  const [cryptoMethods, setCryptoMethods] = useState<
+    Array<{ id: string; chain: string; asset: string; label: string; pay_to: string; token?: string }>
+  >([]);
+  const [cryptoPay, setCryptoPay] = useState<{
+    product: string;
+    amountHint: string;
+    step: "pick" | "pay";
+    methodId?: string;
+    details?: {
+      amount_usd: number;
+      chain: string;
+      asset: string;
+      label: string;
+      pay_to: string;
+      token: string | null;
+      note: string;
+      invoice_id: number;
+    };
+  } | null>(null);
   const [googleAvailable, setGoogleAvailable] = useState(false);
+  const [termsAgreed, setTermsAgreed] = useState(false);
+  const [termsBusy, setTermsBusy] = useState(false);
 
   useEffect(() => {
     const onScale = (e: Event) => {
@@ -100,13 +126,15 @@ export default function Setup() {
     if (params.get("billing") === "success") {
       toast(t("You're upgraded — welcome aboard"));
       window.history.replaceState(null, "", "/setup");
+    } else if (params.get("billing") === "credits_success") {
+      toast(t("Video credits added — generate clips from Drafts"));
+      window.history.replaceState(null, "", "/setup");
     } else if (params.get("billing") === "cancel") {
       toast(t("Checkout cancelled"));
       window.history.replaceState(null, "", "/setup");
     }
 
     if (isConfigured()) {
-      setStatus("ok");
       loadProfile();
     }
     api
@@ -123,6 +151,7 @@ export default function Setup() {
       setProjects(p.projects || "");
       setVoice(p.brand_voice || "");
       setTraits(p.traits || {});
+      setWatermarkUrl(p.watermark_media_url || null);
       if (p.traits?.preferred_language) setLocale(p.traits.preferred_language);
       setConnected(true);
     } catch {
@@ -130,9 +159,14 @@ export default function Setup() {
       return;
     }
     try {
-      const [c, m] = await Promise.all([api.getConnections(), api.me()]);
+      const [c, m, crypto] = await Promise.all([
+        api.getConnections(),
+        api.me(),
+        api.billingCryptoConfig().catch(() => null),
+      ]);
       setConns(c);
       setMe(m);
+      setCryptoMethods(crypto?.enabled ? crypto.methods || [] : []);
     } catch {
       /* older hubs */
     }
@@ -201,6 +235,71 @@ export default function Setup() {
     }
   }
 
+  function openCryptoCheckout(product: string, amountHint: string) {
+    if (!cryptoMethods.length) {
+      toast(t("Crypto deposits aren't enabled yet"));
+      return;
+    }
+    if (cryptoMethods.length === 1) {
+      void createCryptoInvoice(product, amountHint, cryptoMethods[0].id);
+      return;
+    }
+    setCryptoPay({ product, amountHint, step: "pick" });
+  }
+
+  async function createCryptoInvoice(product: string, amountHint: string, methodId: string) {
+    setBillingBusy(true);
+    try {
+      const inv = await api.billingCryptoInvoice(product, methodId);
+      setCryptoPay({
+        product,
+        amountHint,
+        step: "pay",
+        methodId,
+        details: {
+          amount_usd: inv.amount_usd,
+          chain: inv.chain,
+          asset: inv.asset,
+          label: inv.label,
+          pay_to: inv.pay_to,
+          token: inv.token,
+          note: inv.note,
+          invoice_id: inv.invoice?.id,
+        },
+      });
+    } catch (e: any) {
+      toast(e.message);
+      setCryptoPay(null);
+    } finally {
+      setBillingBusy(false);
+    }
+  }
+
+  async function copyCryptoField(value: string, label: string) {
+    try {
+      await copyText(value);
+      toast(t("Copied {label}", { label }));
+    } catch {
+      toast(t("Couldn't copy"));
+    }
+  }
+
+  async function buyVideoCredits(pack: "5" | "15" | "40") {
+    setBillingBusy(true);
+    try {
+      if (me?.credits_checkout || me?.billing_configured) {
+        const { url } = await api.billingCreditsCheckout(pack);
+        window.location.href = url;
+        return;
+      }
+      window.location.href = `mailto:hello@brand-studio.app?subject=Buy%20${pack}%20video%20credits&body=I'd like ${pack} AI video credits (${me?.email || ""}).`;
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setBillingBusy(false);
+    }
+  }
+
   async function openPortal() {
     setBillingBusy(true);
     try {
@@ -229,11 +328,17 @@ export default function Setup() {
 
   async function submitAuth() {
     if (!email.trim() || !password) return;
+    if (mode === "signup" && !termsAgreed) {
+      toast(t("Please agree to the Terms and Privacy Policy"));
+      return;
+    }
     setAuthBusy(true);
     try {
       const result =
         mode === "signup"
-          ? await api.signup(email.trim(), password, localStorage.getItem("refCode") || undefined)
+          ? await api.signup(email.trim(), password, localStorage.getItem("refCode") || undefined, {
+              terms_accepted: true,
+            })
           : await api.login(email.trim(), password);
       clearHubConfig();
       setAuth(result.token, result.email);
@@ -245,6 +350,21 @@ export default function Setup() {
       toast(e.message);
     } finally {
       setAuthBusy(false);
+    }
+  }
+
+  async function acceptTermsNow() {
+    setTermsBusy(true);
+    try {
+      await api.acceptTerms();
+      setMe((prev) =>
+        prev ? { ...prev, terms_accepted_at: new Date().toISOString() } : prev
+      );
+      toast(t("Thanks — you're all set"));
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setTermsBusy(false);
     }
   }
 
@@ -264,14 +384,11 @@ export default function Setup() {
     setHubConfig(urlValue.trim(), tokenValue.trim());
     clearAuth();
     setSignedInAs("");
-    setStatus("testing");
     try {
       await api.health();
-      setStatus("ok");
       toast(t("Connected to your server"));
       loadProfile();
     } catch (e: any) {
-      setStatus("fail");
       toast(e.message);
     }
   }
@@ -280,7 +397,6 @@ export default function Setup() {
     clearHubConfig();
     setUrl("");
     setToken("");
-    setStatus("idle");
     setConnected(false);
     toast(t("Back to Brand Studio cloud — sign in above"));
   }
@@ -329,6 +445,17 @@ export default function Setup() {
               </span>
             )}
           </div>
+          {signedInAs && me && !me.terms_accepted_at && (
+            <div className="terms-gate" style={{ marginBottom: 14 }}>
+              <p className="card-desc" style={{ marginBottom: 10 }}>
+                {t("Please accept the Terms of Service and Privacy Policy to continue.")}{" "}
+                <Link to="/terms">{t("Terms")}</Link> · <Link to="/privacy">{t("Privacy")}</Link>
+              </p>
+              <button className="btn primary block" disabled={termsBusy} onClick={() => void acceptTermsNow()}>
+                {termsBusy ? <span className="spinner" /> : t("I agree")}
+              </button>
+            </div>
+          )}
           {signedInAs ? (
             <>
               <p className="card-desc">{signedInAs} — {t("ideas, drafts and schedule sync here.")}</p>
@@ -348,6 +475,19 @@ export default function Setup() {
                       }}
                     />
                   </div>
+                  {tierAtLeast(me.tier, "creator") && (
+                    <p className="muted small" style={{ marginTop: 8 }}>
+                      {t("{used}/{limit} AI stills", {
+                        used: me.stills_used ?? 0,
+                        limit: me.stills_limit ?? 0,
+                      })}
+                      {tierAtLeast(me.tier, "studio")
+                        ? ` · ${t("{n} videos left", { n: me.videos_remaining ?? 0 })}`
+                        : me.video_credits
+                          ? ` · ${t("{n} video credits", { n: me.video_credits })}`
+                          : ""}
+                    </p>
+                  )}
                   {me.tier !== "studio" && (
                     <div className="plan-upsell" style={{ marginTop: 12 }}>
                       {me.tier === "free" && (
@@ -368,8 +508,53 @@ export default function Setup() {
                         {me.tier === "creator" ? t("Upgrade to Studio") : t("Go Studio")} — {PLAN_COPY.studio.price}
                       </button>
                       <p className="muted small" style={{ marginTop: 8, textAlign: "center" }}>
-                        {t("Creator: more drafts + queue. Studio: agents, Imagine, your server.")}
+                        {t("Creator: drafts + AI stills. Studio: AI video, agents, your server.")}
                       </p>
+                      {cryptoMethods.length > 0 && (
+                        <button
+                          className="btn ghost sm block"
+                          style={{ marginTop: 8 }}
+                          disabled={billingBusy}
+                          onClick={() =>
+                            openCryptoCheckout(
+                              me.tier === "free" ? "creator" : "studio",
+                              me.tier === "free" ? PLAN_COPY.creator.price : PLAN_COPY.studio.price
+                            )
+                          }
+                        >
+                          {t("Pay with crypto")}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {tierAtLeast(me.tier, "creator") && (
+                    <div className="credit-packs" style={{ marginTop: 12 }}>
+                      <p className="muted small" style={{ marginBottom: 8 }}>
+                        {t("Need more AI video? Buy clip credits anytime.")}
+                      </p>
+                      <div className="chip-row">
+                        {VIDEO_CREDIT_PACKS.map((p) => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            className="chip-btn"
+                            disabled={billingBusy}
+                            onClick={() => buyVideoCredits(p.id)}
+                          >
+                            {p.blurb} · {p.price}
+                          </button>
+                        ))}
+                      </div>
+                      {cryptoMethods.length > 0 && (
+                        <button
+                          className="btn ghost sm block"
+                          style={{ marginTop: 8 }}
+                          disabled={billingBusy}
+                          onClick={() => openCryptoCheckout("credits_5", VIDEO_CREDIT_PACKS[0].price)}
+                        >
+                          {t("Pay credits with crypto")}
+                        </button>
+                      )}
                     </div>
                   )}
                   {me.has_stripe_customer && me.billing_configured && (
@@ -388,15 +573,11 @@ export default function Setup() {
               <p className="card-desc">{t("Speak an idea. Get posts for every platform. Free to start.")}</p>
               {googleAvailable && (
                 <>
-                  <button
-                    className="btn block"
-                    style={{ marginTop: 14 }}
-                    onClick={() => {
-                      window.location.href = `${getHubUrl()}/api/auth/google/start`;
-                    }}
-                  >
-                    {t("Continue with Google")}
-                  </button>
+                  <GoogleButton />
+                  <p className="muted small" style={{ marginTop: 8, textAlign: "center" }}>
+                    {t("By continuing with Google you agree to the")}{" "}
+                    <Link to="/terms">{t("Terms")}</Link> {t("and")} <Link to="/privacy">{t("Privacy Policy")}</Link>.
+                  </p>
                   <div className="auth-divider">{t("or use email")}</div>
                 </>
               )}
@@ -435,11 +616,36 @@ export default function Setup() {
                   required
                   minLength={mode === "signup" ? 8 : undefined}
                 />
+                {mode === "signup" && (
+                  <label className="terms-check" htmlFor="auth-terms">
+                    <input
+                      id="auth-terms"
+                      type="checkbox"
+                      checked={termsAgreed}
+                      onChange={(e) => setTermsAgreed(e.target.checked)}
+                    />
+                    <span>
+                      {t("I agree to the")}{" "}
+                      <Link to="/terms" target="_blank" rel="noreferrer">
+                        {t("Terms of Service")}
+                      </Link>{" "}
+                      {t("and")}{" "}
+                      <Link to="/privacy" target="_blank" rel="noreferrer">
+                        {t("Privacy Policy")}
+                      </Link>
+                    </span>
+                  </label>
+                )}
                 <button
                   type="submit"
                   className="btn primary block"
                   style={{ marginTop: 14 }}
-                  disabled={!email.trim() || !password || authBusy}
+                  disabled={
+                    !email.trim() ||
+                    !password ||
+                    authBusy ||
+                    (mode === "signup" && !termsAgreed)
+                  }
                 >
                   {authBusy ? <span className="spinner" /> : mode === "signup" ? t("setup.createAccount") : t("setup.signIn")}
                 </button>
@@ -464,13 +670,13 @@ export default function Setup() {
           {t("setup.yourBrand")}
         </div>
         <p className="card-desc">
-          {t("So every draft sounds like you.")}
+          {t("Concrete facts beat vibes — who you talk to, how you sound, words you never use. That's how drafts stay yours.")}
           {!connected && (selfHostActive ? " " + t("Connect your server below first.") : " " + t("Sign in first."))}
         </p>
         <label>{t("setup.goals")}</label>
         <textarea
           rows={3}
-          placeholder={t("What are you building toward?")}
+          placeholder={t("What do you want people to know you for?")}
           value={goals}
           onChange={(e) => setGoals(e.target.value)}
           disabled={!connected}
@@ -478,7 +684,7 @@ export default function Setup() {
         <label>{t("setup.projects")}</label>
         <textarea
           rows={3}
-          placeholder={t("What are you shipping right now?")}
+          placeholder={t("Real things you're working on right now — specifics beat slogans.")}
           value={projects}
           onChange={(e) => setProjects(e.target.value)}
           disabled={!connected}
@@ -486,7 +692,7 @@ export default function Setup() {
         <label>{t("setup.voice")}</label>
         <textarea
           rows={3}
-          placeholder={t("Tone, do's and don'ts, who you're talking to.")}
+          placeholder={t("How you talk in real life — phrases you use, words you never say, who you're talking to.")}
           value={voice}
           onChange={(e) => setVoice(e.target.value)}
           disabled={!connected}
@@ -519,7 +725,7 @@ export default function Setup() {
         </div>
         <label>{t("Audience")}</label>
         <input
-          placeholder={t("e.g. creators who want to post more consistently")}
+          placeholder={t("e.g. local tradies who hate corporate jargon")}
           value={traits.target_audience || ""}
           onChange={(e) => setTraits({ ...traits, target_audience: e.target.value })}
           disabled={!connected}
@@ -555,7 +761,84 @@ export default function Setup() {
         <p className="card-desc" style={{ marginTop: 6, marginBottom: 10 }}>
           {t("setup.appLanguageHint")}
         </p>
-        <div className="row" style={{ gap: 10 }}>
+        <label>{t("Custom watermark")}</label>
+        <p className="card-desc" style={{ marginTop: 0, marginBottom: 8 }}>
+          {t("Upload a PNG logo — we'll stamp it in the lower-right on stills and clips when watermark is On.")}
+        </p>
+        {watermarkUrl ? (
+          <div className="watermark-preview-row">
+            <div className="watermark-corner-demo" aria-hidden="true">
+              <img className="watermark-preview" src={watermarkUrl} alt="" />
+              <span className="watermark-corner-label">{t("Lower right")}</span>
+            </div>
+            <button
+              type="button"
+              className="btn sm outline"
+              disabled={!connected || watermarkBusy || savingProfile}
+              onClick={async () => {
+                setWatermarkUrl(null);
+                if (!connected) return;
+                setSavingProfile(true);
+                try {
+                  await api.saveProfile({
+                    goals,
+                    projects,
+                    brand_voice: voice,
+                    traits: { ...traits, preferred_language: traits.preferred_language || "en" },
+                    watermark_media_url: null,
+                  });
+                  toast(t("Watermark removed"));
+                } catch (e: any) {
+                  toast(e.message);
+                } finally {
+                  setSavingProfile(false);
+                }
+              }}
+            >
+              {t("Remove")}
+            </button>
+          </div>
+        ) : (
+          <label className={`btn sm ${!connected || watermarkBusy ? "disabled" : ""}`} style={{ display: "inline-flex", cursor: connected ? "pointer" : "default" }}>
+            <ImageIcon size={15} />
+            {watermarkBusy ? t("Uploading…") : t("Upload watermark")}
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              hidden
+              disabled={!connected || watermarkBusy}
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                setWatermarkBusy(true);
+                try {
+                  const prepared = await prepareMedia(file);
+                  const up = await api.uploadMedia(prepared);
+                  if (!up.mime?.startsWith("image/")) {
+                    toast(t("Watermark must be an image"));
+                    return;
+                  }
+                  setWatermarkUrl(up.url);
+                  // Persist immediately so Drafts can stamp clips without a second Save tap.
+                  await api.saveProfile({
+                    goals,
+                    projects,
+                    brand_voice: voice,
+                    traits: { ...traits, preferred_language: traits.preferred_language || "en" },
+                    watermark_media_url: up.url,
+                  });
+                  toast(t("Watermark saved — lower right on generates"));
+                } catch (err: any) {
+                  toast(err.message || t("Couldn't upload watermark"));
+                } finally {
+                  setWatermarkBusy(false);
+                }
+              }}
+            />
+          </label>
+        )}
+        <div className="row" style={{ gap: 10, marginTop: 12 }}>
           <div style={{ flex: 1 }}>
             <label>{t("Emoji")}</label>
             <select
@@ -596,6 +879,7 @@ export default function Setup() {
                 projects,
                 brand_voice: voice,
                 traits: { ...traits, preferred_language: lang },
+                watermark_media_url: watermarkUrl,
               });
               toast(t("setup.saved"));
             } catch (e: any) {
@@ -675,7 +959,7 @@ export default function Setup() {
               className="btn primary block"
               onClick={() =>
                 shareText(
-                  t("I speak ideas into Brand Studio and it writes posts for every platform. Join with my link — we both get bonus drafts: {link}", {
+                  t("I talk ideas into Brand Studio when I can't get them onto the screen. Join with my link — we both get bonus drafts: {link}", {
                     link: `${window.location.origin}/?ref=${me.ref_code}`,
                   })
                 )
@@ -753,76 +1037,15 @@ export default function Setup() {
                 <DumbbellIcon size={16} />
                 {t("Workout log")}
               </Link>
-              <button
-                className="btn ghost block"
-                style={{ marginTop: 8 }}
-                onClick={() => setShowSelfHost(!showSelfHost)}
-              >
+              <button className="btn ghost block" style={{ marginTop: 8 }} type="button" disabled>
                 <GearIcon size={16} />
-                {showSelfHost ? t("Hide self-hosted server") : t("Show self-hosted server")}
+                {t("Self-hosted server")} — {t("Coming soon")}
               </button>
-              {showSelfHost && (
-                <>
-                  <p className="card-desc" style={{ marginTop: 12 }}>
-                    {t("Point this app at your own Brand Studio server. Pairing stays on this device.")}
-                    {selfHostActive && status === "ok" && (
-                      <span className="small">
-                        {" "}
-                        <span className="status-dot ok" /> {t("connected")}
-                      </span>
-                    )}
-                  </p>
-                  {isScanSupported() && (
-                    <button className="btn block" style={{ marginTop: 10 }} onClick={() => setScanning(true)}>
-                      <QrIcon size={17} />
-                      {t("Scan pairing code")}
-                    </button>
-                  )}
-                  <label>{t("Server URL")}</label>
-                  <input
-                    type="url"
-                    inputMode="url"
-                    placeholder="https://your-server.example.com"
-                    value={url}
-                    onChange={(e) => setUrl(e.target.value)}
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                  <label>{t("Access token")}</label>
-                  <input
-                    type="password"
-                    name="hub-access-token"
-                    autoComplete="off"
-                    data-1p-ignore
-                    data-lpignore="true"
-                    placeholder={t("Token from your server setup")}
-                    value={token}
-                    onChange={(e) => setToken(e.target.value)}
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                  />
-                  <button
-                    className="btn primary block"
-                    style={{ marginTop: 14 }}
-                    onClick={() => connectSelfHost(url, token)}
-                    disabled={!url.trim() || !token.trim() || status === "testing"}
-                  >
-                    {status === "testing" ? <span className="spinner" /> : t("Save & test")}
-                  </button>
-                  {selfHostActive && (
-                    <button className="btn ghost block" style={{ marginTop: 8 }} onClick={disconnectSelfHost}>
-                      {t("Switch back to cloud")}
-                    </button>
-                  )}
-                </>
-              )}
             </>
           ) : (
             <>
               <p className="card-desc">
-                {t("Run Brand Studio on your own server, plug in AI agents, and unlock 1,000 drafts / month.")}
+                {t("Run Brand Studio on your own server, plug in AI agents, and unlock Studio AI video.")}
               </p>
               <ul className="plan-feature-list">
                 {PLAN_COPY.studio.features.map((f) => (
@@ -864,10 +1087,86 @@ export default function Setup() {
         <p>
           <b style={{ color: "var(--text-2)" }}>{t("Android:")}</b> {t("Chrome → menu → Add to Home screen.")}
         </p>
-        <p style={{ marginBottom: 0 }}>
+        <p style={{ marginBottom: 8 }}>
           <b style={{ color: "var(--text-2)" }}>{t("iPhone:")}</b> {t("Safari → Share → Add to Home Screen.")}
         </p>
+        <p style={{ marginBottom: 0 }}>
+          <Link to="/terms">{t("Terms of Service")}</Link>
+          {" · "}
+          <Link to="/privacy">{t("Privacy Policy")}</Link>
+        </p>
       </div>
+
+      {cryptoPay && (
+        <div className="sheet-overlay" onClick={() => !billingBusy && setCryptoPay(null)} role="presentation">
+          <div
+            className="sheet crypto-pay-sheet"
+            role="dialog"
+            aria-label={t("Pay with crypto")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {cryptoPay.step === "pick" ? (
+              <>
+                <div className="sheet-title">{t("Pick a deposit rail")}</div>
+                <p className="muted small" style={{ marginTop: 0 }}>
+                  {t("Amount")}: {cryptoPay.amountHint}
+                </p>
+                <div className="chip-row" style={{ marginTop: 12 }}>
+                  {cryptoMethods.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      className="chip-btn"
+                      disabled={billingBusy}
+                      onClick={() => void createCryptoInvoice(cryptoPay.product, cryptoPay.amountHint, m.id)}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              cryptoPay.details && (
+                <>
+                  <div className="sheet-title">{t("Pay with crypto")}</div>
+                  <p className="crypto-pay-amount">
+                    ${cryptoPay.details.amount_usd} USD · {cryptoPay.details.label}
+                  </p>
+                  <p className="muted small" style={{ marginTop: 0 }}>
+                    {t(
+                      "Send the exact amount to this address. No memo needed — we credit your account automatically after network confirmations."
+                    )}
+                  </p>
+
+                  <label className="crypto-pay-label">{t("Deposit address")}</label>
+                  <div className="crypto-pay-address-row">
+                    <code className="crypto-pay-address">{cryptoPay.details.pay_to}</code>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => void copyCryptoField(cryptoPay.details!.pay_to, t("address"))}
+                    >
+                      {t("Copy")}
+                    </button>
+                  </div>
+
+                  <p className="muted small" style={{ marginTop: 14 }}>
+                    {cryptoPay.details.note}
+                  </p>
+                </>
+              )
+            )}
+            <button
+              className="btn ghost block"
+              style={{ marginTop: 14 }}
+              disabled={billingBusy}
+              onClick={() => setCryptoPay(null)}
+            >
+              {t("Done")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

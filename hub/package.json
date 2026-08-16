@@ -8,7 +8,8 @@
     "start": "node --env-file=.env src/index.js",
     "dev": "node --env-file=.env --watch src/index.js",
     "qr": "node --env-file=.env src/qr.js",
-    "set-tier": "node --env-file=.env src/set-tier.js"
+    "set-tier": "node --env-file=.env src/set-tier.js",
+    "stress": "node scripts/stress.mjs"
   },
   "engines": {
     "node": ">=20.6.0"
@@ -19,6 +20,7 @@
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.35.3",
     "stripe": "^17.7.0"
   }
 }
