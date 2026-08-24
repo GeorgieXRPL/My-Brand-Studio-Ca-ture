@@ -1,5 +1,5 @@
 /**
- * Phrase-based i18n: pass English UI copy to t("…"); locale packs map English → translation.
+ * Phrase-based i18n: pass English UI copy to t("..."); locale packs map English → translation.
  * Legacy keys like "nav.capture" still resolve via LEGACY_KEYS.
  */
 
@@ -52,6 +52,19 @@ export const LEGACY_KEYS: Record<string, string> = {
   "setup.goals": "Goals",
   "setup.projects": "Projects",
   "setup.voice": "Voice",
+  "setup.neverUse": "Never use",
+  "setup.neverUseHint": "Short list. Words or phrases drafts should skip.",
+  "setup.alwaysUse": "Always prefer",
+  "setup.alwaysUseHint": "Short list. Phrases that sound like you.",
+  "setup.examplePosts": "Example posts",
+  "setup.examplePostsHint": "Optional. Up to 3 posts you already like. We match the energy, not the wording.",
+  "setup.examplePostN": "Example {n}",
+  "setup.textAi": "Text AI",
+  "setup.textAiHint": "Who writes your captions. Grok is the default. Claude is used if Grok is down.",
+  "setup.textAiGrok": "Grok",
+  "setup.textAiClaude": "Claude",
+  "setup.unsaved": "You have unsaved brand changes.",
+  "setup.discard": "Discard",
   "common.share": "Share",
   "common.copy": "Copy",
   "common.edit": "Edit",
@@ -74,7 +87,6 @@ function applyVars(text: string, vars?: Record<string, string | number>): string
   return out;
 }
 
-/** Locale packs: English phrase → translation. Missing entries fall back to English. */
 export type Dict = Record<string, string>;
 
 export function resolveEnglish(phraseOrKey: string): string {
