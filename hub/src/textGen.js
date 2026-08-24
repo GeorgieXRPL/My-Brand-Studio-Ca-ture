@@ -6,6 +6,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { algoKnowledgeAsOf } from "./algoContext.js";
 import { resolveOutputLanguage } from "./languages.js";
 import { sanitizeCopy, sanitizeVariants } from "./sanitize.js";
+import { voiceGuideBlocks } from "./voiceGuide.js";
 
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
 const XAI_TEXT_MODEL = process.env.XAI_TEXT_MODEL || "grok-4.3";
@@ -74,7 +75,7 @@ function languageBlock(profile) {
   ].join("\n");
 }
 
-function buildSystemPrompt(profile) {
+export function buildSystemPrompt(profile) {
   const goals = profile?.goals?.trim() || "(not provided yet)";
   const projects = profile?.projects?.trim() || "(not provided yet)";
   const voice =
@@ -99,7 +100,7 @@ function buildSystemPrompt(profile) {
     projects,
     "",
     "BRAND VOICE / AUDIENCE / RULES:",
-    voice + traitLines(profile?.traits),
+    voice + traitLines(profile?.traits) + voiceGuideBlocks(profile?.traits),
     languageBlock(profile),
     "",
     "Always write in that voice. Be specific, human, and useful.",
