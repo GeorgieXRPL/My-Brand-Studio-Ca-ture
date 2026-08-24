@@ -17,7 +17,6 @@ function authHeaders() {
 }
 
 export function videoModel() {
-  // Latest Imagine video as of 2026-08: grok-imagine-video-1.5 ($0.08/s).
   return process.env.XAI_VIDEO_MODEL || "grok-imagine-video-1.5";
 }
 
@@ -33,7 +32,6 @@ export function imagineMonthlyLimit() {
 
 const FILM_POST_PLATFORMS = new Set(["tiktok", "instagram", "snapchat"]);
 
-/** Lightweight parse of HOOK:/BEAT:/ON_SCREEN:/CAPTION:/IMAGINE: labeled scripts. */
 export function parseFilmLabels(raw) {
   const text = (raw || "").trim();
   if (!text) return { hook: "", beats: [], onScreen: "", keyword: "", caption: "", imagine: "", labeled: false };
@@ -69,7 +67,6 @@ export function parseFilmLabels(raw) {
   return { hook, beats, onScreen, keyword, caption, imagine, labeled };
 }
 
-/** Caption for Share/Post — never the full talk-track script on video platforms. */
 export function extractPostCaption(raw, platform) {
   const text = (raw || "").trim();
   if (!text) return "";
@@ -84,10 +81,6 @@ export function extractPostCaption(raw, platform) {
 const NO_BURN =
   "Do not burn any captions, titles, watermarks, or on-screen text onto the video. Leave the frame clean for a separate caption overlay.";
 
-/**
- * Strip any "paint/burn text into the frame" instructions (Claude or older clients).
- * Optionally recover the intended on-screen phrase from quoted burn clauses.
- */
 export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
   let text = String(prompt || "").trim();
   let extractedOnScreen = "";
@@ -128,11 +121,6 @@ export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
   };
 }
 
-/**
- * Build a vertical short-form video prompt from draft topic + film beats.
- * Pass short vibe / content_style / target_audience. Do not pass never-use lists.
- * brandVoice stays sliced to 200 chars.
- */
 export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice, vibe, content_style, target_audience }) {
   const beatLine = (beats || []).filter(Boolean).slice(0, 4).join("; ");
   const look = [vibe, content_style, target_audience]
@@ -153,3 +141,150 @@ export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandV
   ];
   return sanitizeImaginePrompt(parts.filter(Boolean).join(" ")).prompt;
 }
+
+export async function startVideoGeneration({
+  prompt,
+  imageUrl,
+  duration = 6,
+  aspectRatio = "9:16",
+  resolution = "1080p",
+}) {
+  if (!imagineConfigured()) {
+    const err = new Error("AI clip generation is not configured on this hub.");
+    err.status = 503;
+    throw err;
+  }
+
+  const tryResolutions = [resolution, resolution === "1080p" ? "720p" : null].filter(Boolean);
+  let lastErr = null;
+  const cleanPrompt = sanitizeImaginePrompt(prompt).prompt;
+  for (const resName of tryResolutions) {
+    const body = {
+      model: videoModel(),
+      prompt: cleanPrompt,
+      duration: Math.min(8, Math.max(1, Number(duration) || 6)),
+      aspect_ratio: aspectRatio,
+      resolution: resName,
+    };
+    if (imageUrl) {
+      body.image = { url: imageUrl };
+    }
+
+    const res = await fetch(`${XAI_BASE}/videos/generations`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.request_id) {
+      return { requestId: data.request_id, resolution: resName };
+    }
+    lastErr = new Error(data?.error?.message || data?.error || `xAI video start failed (${res.status})`);
+    lastErr.status = res.status;
+    if (res.status !== 400 && res.status !== 422) break;
+  }
+  throw lastErr || new Error("xAI did not return a request_id");
+}
+
+export async function pollVideo(requestId) {
+  const res = await fetch(`${XAI_BASE}/videos/${encodeURIComponent(requestId)}`, {
+    headers: { Authorization: `Bearer ${process.env.XAI_API_KEY}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || data?.error || `xAI poll failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return {
+    status: data.status,
+    progress: data.progress ?? null,
+    url: data.video?.url || data.video?.file_output?.public_url || null,
+    duration: data.video?.duration ?? null,
+    error: data.error?.message || null,
+    respectModeration: data.video?.respect_moderation,
+  };
+}
+
+export async function downloadBinary(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download generated media (${res.status})`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const mime = (res.headers.get("content-type") || "video/mp4").split(";")[0].trim();
+  return { buf, mime };
+}
+
+export async function generateStill({ prompt, aspectRatio = "9:16" }) {
+  if (!imagineConfigured()) {
+    const err = new Error("AI image generation is not configured on this hub.");
+    err.status = 503;
+    throw err;
+  }
+  const res = await fetch(`${XAI_BASE}/images/generations`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      model: imageModel(),
+      prompt,
+      n: 1,
+      aspect_ratio: aspectRatio,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || data?.error || `xAI image failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  const url = data.data?.[0]?.url || data.url;
+  if (!url) throw new Error("xAI did not return an image URL");
+  return { url };
+}
+
+export async function editStill({ imageUrl, prompt, aspectRatio = "9:16" }) {
+  if (!imagineConfigured()) {
+    const err = new Error("AI image editing is not configured on this hub.");
+    err.status = 503;
+    throw err;
+  }
+  const src = (imageUrl || "").trim();
+  const text = (prompt || "").trim();
+  if (!src) {
+    const err = new Error("Source image is required.");
+    err.status = 400;
+    throw err;
+  }
+  if (!text) {
+    const err = new Error("Describe the change you want.");
+    err.status = 400;
+    throw err;
+  }
+
+  const res = await fetch(`${XAI_BASE}/images/edits`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      model: imageModel(),
+      prompt: text,
+      image: { url: src, type: "image_url" },
+      n: 1,
+      aspect_ratio: aspectRatio,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || data?.error || `xAI image edit failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  const url = data.data?.[0]?.url || data.url;
+  if (!url) throw new Error("xAI did not return an edited image URL");
+  return { url };
+}
+
+export const STILL_EDIT_PRESETS = {
+  brighten: "Brighten this photo naturally. Keep the same subject, framing, and composition. No text overlays.",
+  clean_bg: "Clean up and simplify the background while keeping the main subject sharp and unchanged. No text overlays.",
+  pop: "Make this photo more scroll-stopping for social: richer contrast and clarity, still realistic. Keep the subject and framing. No text overlays.",
+  natural: "Make this look more natural and true-to-life — less processed, soft realistic light. Keep the subject and framing. No text overlays.",
+};
