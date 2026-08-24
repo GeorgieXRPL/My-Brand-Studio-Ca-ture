@@ -30,6 +30,12 @@ export interface BrandTraits {
   preferred_language?: string;
   /** Caption LLM: claude | grok (default grok). */
   text_provider?: "claude" | "grok";
+  /** Short list of words/phrases the model must not use. */
+  never_use?: string[];
+  /** Short list of words/phrases the model should prefer. */
+  always_use?: string[];
+  /** Optional 2–3 example posts (capped server-side). */
+  example_posts?: string[];
 }
 
 export interface Profile {
@@ -92,7 +98,7 @@ export interface Idea {
   status: string;
   media_url: string | null;
   created_at: string;
-}
+};
 
 export type Variants = Record<Platform, string>;
 
@@ -104,7 +110,6 @@ export interface Draft {
   status: "draft" | "approved" | "posted";
   source: "user" | "agent";
   media_url: string | null;
-  /** Capture/source media before Imagine still/edit/video. */
   original_media_url?: string | null;
   media_mime?: string | null;
   original_media_mime?: string | null;
@@ -150,7 +155,7 @@ export interface ApiKey {
 
 export interface ScheduleBlock {
   id: number;
-  weekday: number; // 1 = Mon .. 7 = Sun
+  weekday: number;
   start_time: string;
   end_time: string;
   title: string;
@@ -186,7 +191,6 @@ export interface ScheduledPost {
   status: "scheduled" | "publishing" | "posted" | "failed";
   error: string | null;
   created_at: string;
-  /** Enriched by GET /api/posts/scheduled */
   draft_topic?: string;
   draft_preview?: string;
   draft_media_url?: string | null;
