@@ -70,6 +70,7 @@ export default function Setup() {
   const [traits, setTraits] = useState<BrandTraits>({});
   const [watermarkUrl, setWatermarkUrl] = useState<string | null>(null);
   const [watermarkBusy, setWatermarkBusy] = useState(false);
+  const [savedBrand, setSavedBrand] = useState<string>("");
   const [connected, setConnected] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
 
@@ -147,11 +148,7 @@ export default function Setup() {
   async function loadProfile() {
     try {
       const p = await api.getProfile();
-      setGoals(p.goals || "");
-      setProjects(p.projects || "");
-      setVoice(p.brand_voice || "");
-      setTraits(p.traits || {});
-      setWatermarkUrl(p.watermark_media_url || null);
+      applySavedProfile(p);
       if (p.traits?.preferred_language) setLocale(p.traits.preferred_language);
       setConnected(true);
     } catch {
@@ -172,7 +169,102 @@ export default function Setup() {
     }
   }
 
-  function toggleContentType(t: string) {
+
+  const EXAMPLE_CAP = 3;
+  const LIST_CAP = 12;
+
+  function parseList(raw: string, cap = LIST_CAP): string[] {
+    return raw
+      .split(/[\n,]+/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .slice(0, cap);
+  }
+
+  function brandSnapshot(next?: {
+    goals?: string;
+    projects?: string;
+    voice?: string;
+    traits?: BrandTraits;
+    watermarkUrl?: string | null;
+  }) {
+    const t = next?.traits ?? traits;
+    return JSON.stringify({
+      goals: next?.goals ?? goals,
+      projects: next?.projects ?? projects,
+      voice: next?.voice ?? voice,
+      traits: {
+        content_style: t.content_style || "",
+        content_types: t.content_types || [],
+        target_audience: t.target_audience || "",
+        vibe: t.vibe || "",
+        emoji_usage: t.emoji_usage || "",
+        cta_preference: t.cta_preference || "",
+        preferred_language: t.preferred_language || "",
+        text_provider: t.text_provider || "grok",
+        never_use: t.never_use || [],
+        always_use: t.always_use || [],
+        example_posts: (t.example_posts || []).slice(0, EXAMPLE_CAP),
+      },
+      watermarkUrl: next?.watermarkUrl !== undefined ? next.watermarkUrl : watermarkUrl,
+    });
+  }
+
+  function applySavedProfile(p: {
+    goals?: string;
+    projects?: string;
+    brand_voice?: string;
+    traits?: BrandTraits;
+    watermark_media_url?: string | null;
+  }) {
+    const nextGoals = p.goals || "";
+    const nextProjects = p.projects || "";
+    const nextVoice = p.brand_voice || "";
+    const nextTraits = p.traits || {};
+    const nextWm = p.watermark_media_url || null;
+    setGoals(nextGoals);
+    setProjects(nextProjects);
+    setVoice(nextVoice);
+    setTraits(nextTraits);
+    setWatermarkUrl(nextWm);
+    setSavedBrand(
+      JSON.stringify({
+        goals: nextGoals,
+        projects: nextProjects,
+        voice: nextVoice,
+        traits: {
+          content_style: nextTraits.content_style || "",
+          content_types: nextTraits.content_types || [],
+          target_audience: nextTraits.target_audience || "",
+          vibe: nextTraits.vibe || "",
+          emoji_usage: nextTraits.emoji_usage || "",
+          cta_preference: nextTraits.cta_preference || "",
+          preferred_language: nextTraits.preferred_language || "",
+          text_provider: nextTraits.text_provider || "grok",
+          never_use: nextTraits.never_use || [],
+          always_use: nextTraits.always_use || [],
+          example_posts: (nextTraits.example_posts || []).slice(0, EXAMPLE_CAP),
+        },
+        watermarkUrl: nextWm,
+      })
+    );
+  }
+
+  const brandDirty = Boolean(connected && savedBrand && brandSnapshot() !== savedBrand);
+
+  function traitsForSave(): BrandTraits {
+    const lang = traits.preferred_language || "en";
+    return {
+      ...traits,
+      preferred_language: lang,
+      text_provider: traits.text_provider === "claude" ? "claude" : "grok",
+      never_use: (traits.never_use || []).map((x) => x.trim()).filter(Boolean).slice(0, LIST_CAP),
+      always_use: (traits.always_use || []).map((x) => x.trim()).filter(Boolean).slice(0, LIST_CAP),
+      example_posts: (traits.example_posts || []).map((x) => x.trim()).filter(Boolean).slice(0, EXAMPLE_CAP),
+    };
+  }
+
+    function toggleContentType(t: string) {
     const cur = traits.content_types || [];
     setTraits({
       ...traits,
@@ -418,6 +510,35 @@ export default function Setup() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+
+  async function saveBrand() {
+    setSavingProfile(true);
+    try {
+      const nextTraits = traitsForSave();
+      setLocale(nextTraits.preferred_language || "en");
+      setTraits(nextTraits);
+      const saved = await api.saveProfile({
+        goals,
+        projects,
+        brand_voice: voice,
+        traits: nextTraits,
+        watermark_media_url: watermarkUrl,
+      });
+      applySavedProfile(saved || {
+        goals,
+        projects,
+        brand_voice: voice,
+        traits: nextTraits,
+        watermark_media_url: watermarkUrl,
+      });
+      toast(t("setup.saved"));
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
   const selfHostActive = isSelfHost();
   const isStudio = tierAtLeast(me?.tier, "studio") || selfHostActive;
 
@@ -431,6 +552,54 @@ export default function Setup() {
         </h1>
         <span className="sub">{isVoiceSupported() ? t("voice ready") : t("voice: use Chrome / Safari")}</span>
       </div>
+      {brandDirty && (
+        <div
+          className="unsaved-bar"
+          role="status"
+          style={{
+            position: "sticky",
+            top: 0,
+            zIndex: 20,
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            flexWrap: "wrap",
+            margin: "0 0 12px",
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid var(--border-strong)",
+            background: "var(--surface-2)",
+          }}
+        >
+          <span className="small">{t("setup.unsaved")}</span>
+          <button
+            type="button"
+            className="btn sm outline"
+            onClick={() => {
+              try {
+                const snap = JSON.parse(savedBrand);
+                setGoals(snap.goals || "");
+                setProjects(snap.projects || "");
+                setVoice(snap.voice || "");
+                setTraits(snap.traits || {});
+                setWatermarkUrl(snap.watermarkUrl || null);
+              } catch {
+                void loadProfile();
+              }
+            }}
+          >
+            {t("setup.discard")}
+          </button>
+          <button
+            type="button"
+            className="btn primary sm"
+            disabled={!connected || savingProfile}
+            onClick={() => void saveBrand()}
+          >
+            {savingProfile ? <span className="spinner" /> : t("setup.saveBrand")}
+          </button>
+        </div>
+      )}
 
       {/* 1. Account */}
       {!selfHostActive && (
@@ -761,6 +930,66 @@ export default function Setup() {
         <p className="card-desc" style={{ marginTop: 6, marginBottom: 10 }}>
           {t("setup.appLanguageHint")}
         </p>
+        <label>{t("setup.textAi")}</label>
+        <div className="chip-row">
+          <button
+            type="button"
+            className={`chip-btn ${(traits.text_provider || "grok") !== "claude" ? "on" : ""}`}
+            onClick={() => setTraits({ ...traits, text_provider: "grok" })}
+            disabled={!connected}
+          >
+            {t("setup.textAiGrok")}
+          </button>
+          <button
+            type="button"
+            className={`chip-btn ${traits.text_provider === "claude" ? "on" : ""}`}
+            onClick={() => setTraits({ ...traits, text_provider: "claude" })}
+            disabled={!connected}
+          >
+            {t("setup.textAiClaude")}
+          </button>
+        </div>
+        <p className="card-desc" style={{ marginTop: 6, marginBottom: 10 }}>
+          {t("setup.textAiHint")}
+        </p>
+        <label>{t("setup.neverUse")}</label>
+        <textarea
+          rows={2}
+          placeholder={t("setup.neverUseHint")}
+          value={(traits.never_use || []).join(", ")}
+          onChange={(e) => setTraits({ ...traits, never_use: parseList(e.target.value) })}
+          disabled={!connected}
+        />
+        <label>{t("setup.alwaysUse")}</label>
+        <textarea
+          rows={2}
+          placeholder={t("setup.alwaysUseHint")}
+          value={(traits.always_use || []).join(", ")}
+          onChange={(e) => setTraits({ ...traits, always_use: parseList(e.target.value) })}
+          disabled={!connected}
+        />
+        <label>{t("setup.examplePosts")}</label>
+        <p className="card-desc" style={{ marginTop: 0, marginBottom: 8 }}>
+          {t("setup.examplePostsHint")}
+        </p>
+        {[0, 1, 2].map((i) => (
+          <textarea
+            key={i}
+            rows={2}
+            placeholder={t("setup.examplePostN", { n: i + 1 })}
+            value={(traits.example_posts || [])[i] || ""}
+            onChange={(e) => {
+              const next = [...(traits.example_posts || [])];
+              next[i] = e.target.value;
+              setTraits({
+                ...traits,
+                example_posts: next.map((x) => x.trim()).filter((x, idx) => x || idx <= i).slice(0, EXAMPLE_CAP),
+              });
+            }}
+            disabled={!connected}
+            style={{ marginBottom: 8 }}
+          />
+        ))}
         <label>{t("Custom watermark")}</label>
         <p className="card-desc" style={{ marginTop: 0, marginBottom: 8 }}>
           {t("Upload a PNG logo — we'll stamp it in the lower-right on stills and clips when watermark is On.")}
@@ -780,11 +1009,18 @@ export default function Setup() {
                 if (!connected) return;
                 setSavingProfile(true);
                 try {
-                  await api.saveProfile({
+                  const saved = await api.saveProfile({
                     goals,
                     projects,
                     brand_voice: voice,
-                    traits: { ...traits, preferred_language: traits.preferred_language || "en" },
+                    traits: traitsForSave(),
+                    watermark_media_url: null,
+                  });
+                  applySavedProfile(saved || {
+                    goals,
+                    projects,
+                    brand_voice: voice,
+                    traits: traitsForSave(),
                     watermark_media_url: null,
                   });
                   toast(t("Watermark removed"));
@@ -821,11 +1057,18 @@ export default function Setup() {
                   }
                   setWatermarkUrl(up.url);
                   // Persist immediately so Drafts can stamp clips without a second Save tap.
-                  await api.saveProfile({
+                  const saved = await api.saveProfile({
                     goals,
                     projects,
                     brand_voice: voice,
-                    traits: { ...traits, preferred_language: traits.preferred_language || "en" },
+                    traits: traitsForSave(),
+                    watermark_media_url: up.url,
+                  });
+                  applySavedProfile(saved || {
+                    goals,
+                    projects,
+                    brand_voice: voice,
+                    traits: traitsForSave(),
                     watermark_media_url: up.url,
                   });
                   toast(t("Watermark saved — lower right on generates"));
@@ -869,25 +1112,7 @@ export default function Setup() {
         <button
           className="btn primary block"
           style={{ marginTop: 14 }}
-          onClick={async () => {
-            setSavingProfile(true);
-            try {
-              const lang = traits.preferred_language || "en";
-              setLocale(lang);
-              await api.saveProfile({
-                goals,
-                projects,
-                brand_voice: voice,
-                traits: { ...traits, preferred_language: lang },
-                watermark_media_url: watermarkUrl,
-              });
-              toast(t("setup.saved"));
-            } catch (e: any) {
-              toast(e.message);
-            } finally {
-              setSavingProfile(false);
-            }
-          }}
+          onClick={() => void saveBrand()}
           disabled={!connected || savingProfile}
         >
           {savingProfile ? <span className="spinner" /> : t("setup.saveBrand")}
