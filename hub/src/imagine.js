@@ -44,10 +44,10 @@ export function parseFilmLabels(raw) {
   let caption = "";
   let imagine = "";
   const beats = [];
-  const labeled = /^(hook|beat\s*\d*|on[-\s]?screen|caption|imagine)\s*[:\-–]/im.test(text);
+  const labeled = /^(hook|beat\s*\d*|on[-\s]?screen|caption|imagine)\s*[:\-\u2013]/im.test(text);
   for (const line of lines) {
     const m = line.match(
-      /^(hook|beat\s*\d*|on[-\s]?screen|keyword|search|caption|imagine|prompt)\s*[:\-–]\s*(.+)$/i
+      /^(hook|beat\s*\d*|on[-\s]?screen|keyword|search|caption|imagine|prompt)\s*[:\-\u2013]\s*(.+)$/i
     );
     if (!m) continue;
     const label = m[1].toLowerCase();
@@ -75,7 +75,7 @@ export function extractPostCaption(raw, platform) {
   if (!text) return "";
   if (!FILM_POST_PLATFORMS.has(platform)) return text;
   const labels = parseFilmLabels(text);
-  if (labels.labeled || /^caption\s*[:\-–]/im.test(text)) {
+  if (labels.labeled || /^caption\s*[:\-\u2013]/im.test(text)) {
     return (labels.caption || labels.hook || text).trim();
   }
   return text;
@@ -94,10 +94,10 @@ export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
 
   const burnQuoted =
     text.match(
-      /\b(?:burn|paint|render|overlay|add)\b[\s\S]{0,80}?\b(?:text|caption|title|words?)\b[\s\S]{0,120}?[“"']([^“"']{3,120})[”"']/i
+      /\b(?:burn|paint|render|overlay|add)\b[\s\S]{0,80}?\b(?:text|caption|title|words?)\b[\s\S]{0,120}?[\u201c"']([^\u201c"']{3,120})[\u201d"']/i
     ) ||
     text.match(
-      /\bBurn this exact text[\s\S]{0,160}?[“"']([^“"']{3,120})[”"']/i
+      /\bBurn this exact text[\s\S]{0,160}?[\u201c"']([^\u201c"']{3,120})[\u201d"']/i
     );
   if (burnQuoted?.[1]) {
     extractedOnScreen = burnQuoted[1].replace(/\s+/g, " ").trim();
@@ -130,9 +130,15 @@ export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
 
 /**
  * Build a vertical short-form video prompt from draft topic + film beats.
+ * Pass short vibe / content_style / target_audience. Do not pass never-use lists.
+ * brandVoice stays sliced to 200 chars.
  */
-export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice }) {
+export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice, vibe, content_style, target_audience }) {
   const beatLine = (beats || []).filter(Boolean).slice(0, 4).join("; ");
+  const look = [vibe, content_style, target_audience]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .join("; ");
   const parts = [
     "Vertical 9:16 short-form social video for TikTok/Reels.",
     "Energetic, mobile-first, natural motion, sharp detail, cinematic lighting.",
@@ -143,160 +149,7 @@ export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandV
     onScreen ? `Visual focus (no text overlay): ${onScreen}.` : "",
     keyword ? `Subtle theme keyword: ${keyword}.` : "",
     brandVoice ? `Brand vibe: ${String(brandVoice).slice(0, 200)}.` : "",
+    look ? `Look and feel: ${look.slice(0, 240)}.` : "",
   ];
   return sanitizeImaginePrompt(parts.filter(Boolean).join(" ")).prompt;
 }
-
-export async function startVideoGeneration({
-  prompt,
-  imageUrl,
-  duration = 6,
-  aspectRatio = "9:16",
-  resolution = "1080p",
-}) {
-  if (!imagineConfigured()) {
-    const err = new Error("AI clip generation is not configured on this hub.");
-    err.status = 503;
-    throw err;
-  }
-
-  const tryResolutions = [resolution, resolution === "1080p" ? "720p" : null].filter(Boolean);
-  let lastErr = null;
-  const cleanPrompt = sanitizeImaginePrompt(prompt).prompt;
-  for (const resName of tryResolutions) {
-    const body = {
-      model: videoModel(),
-      prompt: cleanPrompt,
-      duration: Math.min(8, Math.max(1, Number(duration) || 6)),
-      aspect_ratio: aspectRatio,
-      resolution: resName,
-    };
-    if (imageUrl) {
-      body.image = { url: imageUrl };
-    }
-
-    const res = await fetch(`${XAI_BASE}/videos/generations`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && data.request_id) {
-      return { requestId: data.request_id, resolution: resName };
-    }
-    lastErr = new Error(data?.error?.message || data?.error || `xAI video start failed (${res.status})`);
-    lastErr.status = res.status;
-    if (res.status !== 400 && res.status !== 422) break;
-  }
-  throw lastErr || new Error("xAI did not return a request_id");
-}
-
-export async function pollVideo(requestId) {
-  const res = await fetch(`${XAI_BASE}/videos/${encodeURIComponent(requestId)}`, {
-    headers: { Authorization: `Bearer ${process.env.XAI_API_KEY}` },
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || data?.error || `xAI poll failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
-  return {
-    status: data.status, // pending | done | failed | expired
-    progress: data.progress ?? null,
-    url: data.video?.url || data.video?.file_output?.public_url || null,
-    duration: data.video?.duration ?? null,
-    error: data.error?.message || null,
-    respectModeration: data.video?.respect_moderation,
-  };
-}
-
-export async function downloadBinary(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to download generated media (${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  const mime = (res.headers.get("content-type") || "video/mp4").split(";")[0].trim();
-  return { buf, mime };
-}
-
-/** Sync still image — useful for thumbnails / carousels. */
-export async function generateStill({ prompt, aspectRatio = "9:16" }) {
-  if (!imagineConfigured()) {
-    const err = new Error("AI image generation is not configured on this hub.");
-    err.status = 503;
-    throw err;
-  }
-  const res = await fetch(`${XAI_BASE}/images/generations`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      model: imageModel(),
-      prompt,
-      n: 1,
-      aspect_ratio: aspectRatio,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || data?.error || `xAI image failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
-  const url = data.data?.[0]?.url || data.url;
-  if (!url) throw new Error("xAI did not return an image URL");
-  return { url };
-}
-
-/**
- * Edit an existing still with a natural-language prompt (Grok Imagine edits API).
- * Billed as input image + output image (~2× a generate on the same model).
- * imageUrl: public https URL or data: URI.
- */
-export async function editStill({ imageUrl, prompt, aspectRatio = "9:16" }) {
-  if (!imagineConfigured()) {
-    const err = new Error("AI image editing is not configured on this hub.");
-    err.status = 503;
-    throw err;
-  }
-  const src = (imageUrl || "").trim();
-  const text = (prompt || "").trim();
-  if (!src) {
-    const err = new Error("Source image is required.");
-    err.status = 400;
-    throw err;
-  }
-  if (!text) {
-    const err = new Error("Describe the change you want.");
-    err.status = 400;
-    throw err;
-  }
-
-  const res = await fetch(`${XAI_BASE}/images/edits`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      model: imageModel(),
-      prompt: text,
-      image: { url: src, type: "image_url" },
-      n: 1,
-      aspect_ratio: aspectRatio,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || data?.error || `xAI image edit failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
-  const url = data.data?.[0]?.url || data.url;
-  if (!url) throw new Error("xAI did not return an edited image URL");
-  return { url };
-}
-
-/** Preset prompts for Creator-friendly one-tap edits (keep labels in sync with app). */
-export const STILL_EDIT_PRESETS = {
-  brighten: "Brighten this photo naturally. Keep the same subject, framing, and composition. No text overlays.",
-  clean_bg: "Clean up and simplify the background while keeping the main subject sharp and unchanged. No text overlays.",
-  pop: "Make this photo more scroll-stopping for social: richer contrast and clarity, still realistic. Keep the subject and framing. No text overlays.",
-  natural: "Make this look more natural and true-to-life — less processed, soft realistic light. Keep the subject and framing. No text overlays.",
-};
