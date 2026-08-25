@@ -17,7 +17,6 @@ function authHeaders() {
 }
 
 export function videoModel() {
-  // Latest Imagine video as of 2026-08: grok-imagine-video-1.5 ($0.08/s).
   return process.env.XAI_VIDEO_MODEL || "grok-imagine-video-1.5";
 }
 
@@ -33,7 +32,6 @@ export function imagineMonthlyLimit() {
 
 const FILM_POST_PLATFORMS = new Set(["tiktok", "instagram", "snapchat"]);
 
-/** Lightweight parse of HOOK:/BEAT:/ON_SCREEN:/CAPTION:/IMAGINE: labeled scripts. */
 export function parseFilmLabels(raw) {
   const text = (raw || "").trim();
   if (!text) return { hook: "", beats: [], onScreen: "", keyword: "", caption: "", imagine: "", labeled: false };
@@ -44,10 +42,10 @@ export function parseFilmLabels(raw) {
   let caption = "";
   let imagine = "";
   const beats = [];
-  const labeled = /^(hook|beat\s*\d*|on[-\s]?screen|caption|imagine)\s*[:\-–]/im.test(text);
+  const labeled = /^(hook|beat\s*\d*|on[-\s]?screen|caption|imagine)\s*[:\-\u2013]/im.test(text);
   for (const line of lines) {
     const m = line.match(
-      /^(hook|beat\s*\d*|on[-\s]?screen|keyword|search|caption|imagine|prompt)\s*[:\-–]\s*(.+)$/i
+      /^(hook|beat\s*\d*|on[-\s]?screen|keyword|search|caption|imagine|prompt)\s*[:\-\u2013]\s*(.+)$/i
     );
     if (!m) continue;
     const label = m[1].toLowerCase();
@@ -69,13 +67,12 @@ export function parseFilmLabels(raw) {
   return { hook, beats, onScreen, keyword, caption, imagine, labeled };
 }
 
-/** Caption for Share/Post — never the full talk-track script on video platforms. */
 export function extractPostCaption(raw, platform) {
   const text = (raw || "").trim();
   if (!text) return "";
   if (!FILM_POST_PLATFORMS.has(platform)) return text;
   const labels = parseFilmLabels(text);
-  if (labels.labeled || /^caption\s*[:\-–]/im.test(text)) {
+  if (labels.labeled || /^caption\s*[:\-\u2013]/im.test(text)) {
     return (labels.caption || labels.hook || text).trim();
   }
   return text;
@@ -84,20 +81,16 @@ export function extractPostCaption(raw, platform) {
 const NO_BURN =
   "Do not burn any captions, titles, watermarks, or on-screen text onto the video. Leave the frame clean for a separate caption overlay.";
 
-/**
- * Strip any "paint/burn text into the frame" instructions (Claude or older clients).
- * Optionally recover the intended on-screen phrase from quoted burn clauses.
- */
 export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
   let text = String(prompt || "").trim();
   let extractedOnScreen = "";
 
   const burnQuoted =
     text.match(
-      /\b(?:burn|paint|render|overlay|add)\b[\s\S]{0,80}?\b(?:text|caption|title|words?)\b[\s\S]{0,120}?[“"']([^“"']{3,120})[”"']/i
+      /\b(?:burn|paint|render|overlay|add)\b[\s\S]{0,80}?\b(?:text|caption|title|words?)\b[\s\S]{0,120}?[\u201c"']([^\u201c"']{3,120})[\u201d"']/i
     ) ||
     text.match(
-      /\bBurn this exact text[\s\S]{0,160}?[“"']([^“"']{3,120})[”"']/i
+      /\bBurn this exact text[\s\S]{0,160}?[\u201c"']([^\u201c"']{3,120})[\u201d"']/i
     );
   if (burnQuoted?.[1]) {
     extractedOnScreen = burnQuoted[1].replace(/\s+/g, " ").trim();
@@ -128,11 +121,12 @@ export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
   };
 }
 
-/**
- * Build a vertical short-form video prompt from draft topic + film beats.
- */
-export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice }) {
+export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice, vibe, content_style, target_audience }) {
   const beatLine = (beats || []).filter(Boolean).slice(0, 4).join("; ");
+  const look = [vibe, content_style, target_audience]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .join("; ");
   const parts = [
     "Vertical 9:16 short-form social video for TikTok/Reels.",
     "Energetic, mobile-first, natural motion, sharp detail, cinematic lighting.",
@@ -143,6 +137,7 @@ export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandV
     onScreen ? `Visual focus (no text overlay): ${onScreen}.` : "",
     keyword ? `Subtle theme keyword: ${keyword}.` : "",
     brandVoice ? `Brand vibe: ${String(brandVoice).slice(0, 200)}.` : "",
+    look ? `Look and feel: ${look.slice(0, 240)}.` : "",
   ];
   return sanitizeImaginePrompt(parts.filter(Boolean).join(" ")).prompt;
 }
@@ -202,7 +197,7 @@ export async function pollVideo(requestId) {
     throw err;
   }
   return {
-    status: data.status, // pending | done | failed | expired
+    status: data.status,
     progress: data.progress ?? null,
     url: data.video?.url || data.video?.file_output?.public_url || null,
     duration: data.video?.duration ?? null,
@@ -219,7 +214,6 @@ export async function downloadBinary(url) {
   return { buf, mime };
 }
 
-/** Sync still image — useful for thumbnails / carousels. */
 export async function generateStill({ prompt, aspectRatio = "9:16" }) {
   if (!imagineConfigured()) {
     const err = new Error("AI image generation is not configured on this hub.");
@@ -247,11 +241,6 @@ export async function generateStill({ prompt, aspectRatio = "9:16" }) {
   return { url };
 }
 
-/**
- * Edit an existing still with a natural-language prompt (Grok Imagine edits API).
- * Billed as input image + output image (~2× a generate on the same model).
- * imageUrl: public https URL or data: URI.
- */
 export async function editStill({ imageUrl, prompt, aspectRatio = "9:16" }) {
   if (!imagineConfigured()) {
     const err = new Error("AI image editing is not configured on this hub.");
@@ -293,7 +282,6 @@ export async function editStill({ imageUrl, prompt, aspectRatio = "9:16" }) {
   return { url };
 }
 
-/** Preset prompts for Creator-friendly one-tap edits (keep labels in sync with app). */
 export const STILL_EDIT_PRESETS = {
   brighten: "Brighten this photo naturally. Keep the same subject, framing, and composition. No text overlays.",
   clean_bg: "Clean up and simplify the background while keeping the main subject sharp and unchanged. No text overlays.",

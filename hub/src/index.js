@@ -19,6 +19,7 @@ import {
 } from "./auth.js";
 import { findBlockedContent } from "./contentFilter.js";
 import { generateVariants, chat, PLATFORMS, resolveTextProvider, anthropicConfigured, grokTextConfigured } from "./textGen.js";
+import { exportProfilePayload, mergeProfileUpdate } from "./profile.js";
 import {
   connectUnified,
   finishXConnect,
@@ -726,14 +727,12 @@ app.get("/api/profile", wrap((req, res) => {
 }));
 
 app.put("/api/profile", wrap((req, res) => {
-  const {
-    goals = "",
-    projects = "",
-    brand_voice = "",
-    traits = {},
-    watermark_media_url = undefined,
-  } = req.body || {};
+  if (req.tokenKind === "agent") {
+    return res.status(403).json({ error: "Agents can't update the brand profile." });
+  }
   const existing = readProfile(req.userId);
+  const merged = mergeProfileUpdate(existing, req.body || {});
+  const watermark_media_url = merged.watermark_media_url;
   let nextWm = existing.watermark_media_url;
   if (watermark_media_url !== undefined) {
     if (!watermark_media_url) {
@@ -750,7 +749,15 @@ app.put("/api/profile", wrap((req, res) => {
      ON CONFLICT (user_id) DO UPDATE SET goals = excluded.goals, projects = excluded.projects,
        brand_voice = excluded.brand_voice, traits = excluded.traits,
        watermark_media_url = excluded.watermark_media_url, updated_at = excluded.updated_at`
-  ).run(req.userId, goals, projects, brand_voice, JSON.stringify(traits || {}), nextWm, now());
+  ).run(
+    req.userId,
+    merged.goals,
+    merged.projects,
+    merged.brand_voice,
+    JSON.stringify(merged.traits || {}),
+    nextWm,
+    now()
+  );
   res.json(readProfile(req.userId));
 }));
 
@@ -1638,6 +1645,9 @@ app.post("/api/imagine/video", async (req, res) => {
         onScreen: labels.onScreen,
         keyword: labels.keyword,
         brandVoice: profile.brand_voice,
+        vibe: profile.traits?.vibe,
+        content_style: profile.traits?.content_style,
+        target_audience: profile.traits?.target_audience,
       });
     const sanitized = sanitizeImaginePrompt(rawPrompt);
     const prompt = sanitized.prompt;
@@ -2072,7 +2082,7 @@ app.get("/api/export", wrap((req, res) => {
   const u = req.userId;
   res.json({
     exported_at: now(),
-    profile: db.prepare("SELECT goals, projects, brand_voice FROM profiles WHERE user_id = ?").get(u) || {},
+    profile: exportProfilePayload(readProfile(u)),
     ideas: db.prepare("SELECT * FROM ideas WHERE user_id = ?").all(u),
     drafts: db
       .prepare("SELECT * FROM drafts WHERE user_id = ?")
