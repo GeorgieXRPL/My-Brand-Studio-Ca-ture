@@ -28,13 +28,20 @@ function unifiedConfigured() {
 
 export function providerStatus() {
   const viaUnified = unifiedConfigured() ? "available" : "coming_soon";
+  const shareOnly = "unsupported"; // phone share sheet — no direct Post API yet
   return {
     x: xConfigured() ? "available" : "unconfigured",
     facebook: viaUnified,
     instagram: viaUnified,
     tiktok: viaUnified,
     linkedin: viaUnified,
-    snapchat: "unsupported", // no public posting API - share sheet only
+    snapchat: shareOnly,
+    grok: shareOnly,
+    youtube: shareOnly,
+    reddit: shareOnly,
+    threads: shareOnly,
+    pinterest: shareOnly,
+    nextdoor: shareOnly,
   };
 }
 

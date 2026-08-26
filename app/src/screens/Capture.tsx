@@ -14,7 +14,9 @@ import Spark from "../lib/Spark";
 import { MAX_UPLOAD_BYTES, prepareMedia } from "../lib/media";
 import { speechLocaleFor } from "../lib/languages";
 import { useLocale, useT } from "../lib/i18n";
-import type { Idea, Profile } from "../lib/types";
+import type { Idea, Platform, Profile } from "../lib/types";
+import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
+import PlatformPicker from "../lib/PlatformPicker";
 
 const INSIGHTS_PROMO_KEY = "bs.insightsPromo.dismissed";
 
@@ -236,6 +238,29 @@ export default function Capture() {
     }
   }
 
+  async function setEnabledPlatforms(next: Platform[]) {
+    const enabled = normalizeEnabledPlatforms(next);
+    if (!profile) {
+      setProfile({
+        goals: "",
+        projects: "",
+        brand_voice: "",
+        traits: { enabled_platforms: enabled },
+      });
+      return;
+    }
+    const updated: Profile = {
+      ...profile,
+      traits: { ...(profile.traits || {}), enabled_platforms: enabled },
+    };
+    setProfile(updated);
+    try {
+      await api.saveProfile(updated);
+    } catch (e: any) {
+      toast(e.message || t("Couldn't save apps"));
+    }
+  }
+
   async function draftNow(topic: string, ideaId?: number) {
     if (!configured) {
       toast(t("Create a free account on Setup first"));
@@ -246,10 +271,11 @@ export default function Capture() {
     setBusy(true);
     try {
       const textProvider = profile?.traits?.text_provider === "claude" ? "claude" : "grok";
+      const platforms = normalizeEnabledPlatforms(profile?.traits?.enabled_platforms);
       const draft = await api.generate(
         ideaId
-          ? { idea_id: ideaId, text_provider: textProvider }
-          : { topic, media_url: mediaUrl || undefined, text_provider: textProvider }
+          ? { idea_id: ideaId, text_provider: textProvider, platforms }
+          : { topic, media_url: mediaUrl || undefined, text_provider: textProvider, platforms }
       );
       setText("");
       setMediaUrl("");
@@ -443,6 +469,17 @@ export default function Capture() {
               {t("capture.draftNow")}
             </button>
           </div>
+          {configured && (
+            <div className="capture-platforms">
+              <span className="muted small">{t("Push to")}</span>
+              <PlatformPicker
+                compact
+                selected={normalizeEnabledPlatforms(profile?.traits?.enabled_platforms)}
+                onChange={(next) => void setEnabledPlatforms(next)}
+                disabled={busy || !profile}
+              />
+            </div>
+          )}
         </div>
       </div>
 

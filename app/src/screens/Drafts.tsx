@@ -1142,7 +1142,7 @@ export default function Drafts() {
           <Spark size={72} mood="happy" />
           <b>{t("Nothing here yet — talk one out")}</b>
           <p>
-            {t("Speak an idea on Capture and tap Draft now. Then Share — your phone's share sheet sends it to Instagram, TikTok, and the rest.")}
+            {t("Speak an idea on Capture and tap Draft now. Then Share — your phone's share sheet sends it to the apps you picked.")}
           </p>
         </div>
       )}

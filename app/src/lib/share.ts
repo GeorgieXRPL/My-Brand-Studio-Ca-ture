@@ -41,10 +41,16 @@ const CAPTION_PASTE_PLATFORMS: Platform[] = [
   "facebook",
   "x",
   "linkedin",
+  "grok",
+  "youtube",
+  "reddit",
+  "threads",
+  "pinterest",
+  "nextdoor",
 ];
 
 /** Attach text+files last — TikTok often disappears from Android sheets when text is set. */
-const FILES_FIRST_PLATFORMS: Platform[] = ["tiktok", "instagram", "snapchat"];
+const FILES_FIRST_PLATFORMS: Platform[] = ["tiktok", "instagram", "snapchat", "youtube"];
 
 export type ShareResult =
   | "shared"

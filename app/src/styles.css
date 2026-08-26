@@ -1819,6 +1819,13 @@ select:disabled {
   gap: 8px;
   margin-top: 4px;
 }
+.capture-platforms {
+  margin-top: 14px;
+}
+.capture-platforms > .muted {
+  display: block;
+  margin-bottom: 4px;
+}
 .chip-btn {
   padding: 7px 13px;
   border-radius: 999px;
@@ -1833,6 +1840,9 @@ select:disabled {
   background: var(--brand-soft);
   border-color: var(--brand);
   color: var(--text-1);
+}
+.platform-picker .chip-btn.on {
+  border-color: var(--plat-color, var(--brand));
 }
 .chip-btn:disabled {
   opacity: 0.45;

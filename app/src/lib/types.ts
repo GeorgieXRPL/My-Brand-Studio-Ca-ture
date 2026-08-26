@@ -1,5 +1,28 @@
-export const PLATFORMS = ["x", "facebook", "tiktok", "snapchat", "instagram", "linkedin"] as const;
+export const PLATFORMS = [
+  "x",
+  "facebook",
+  "tiktok",
+  "snapchat",
+  "instagram",
+  "linkedin",
+  "grok",
+  "youtube",
+  "reddit",
+  "threads",
+  "pinterest",
+  "nextdoor",
+] as const;
 export type Platform = (typeof PLATFORMS)[number];
+
+/** Destinations we generate by default until the user picks others. */
+export const DEFAULT_ENABLED_PLATFORMS: Platform[] = [
+  "x",
+  "facebook",
+  "tiktok",
+  "snapchat",
+  "instagram",
+  "linkedin",
+];
 
 export const PLATFORM_LABELS: Record<Platform, string> = {
   x: "X",
@@ -8,6 +31,12 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   snapchat: "Snapchat",
   instagram: "Instagram",
   linkedin: "LinkedIn",
+  grok: "Grok / Grokbot",
+  youtube: "YouTube Shorts",
+  reddit: "Reddit",
+  threads: "Threads",
+  pinterest: "Pinterest",
+  nextdoor: "Nextdoor",
 };
 
 export const PLATFORM_COLORS: Record<Platform, string> = {
@@ -17,6 +46,12 @@ export const PLATFORM_COLORS: Record<Platform, string> = {
   snapchat: "#fbbf24",
   instagram: "#f472b6",
   linkedin: "#5b9bd5",
+  grok: "#9ca3af",
+  youtube: "#f87171",
+  reddit: "#fb923c",
+  threads: "#e7e9ea",
+  pinterest: "#f43f5e",
+  nextdoor: "#34d399",
 };
 
 export interface BrandTraits {
@@ -36,6 +71,8 @@ export interface BrandTraits {
   always_use?: string[];
   /** Optional 2–3 example posts (capped server-side). */
   example_posts?: string[];
+  /** Apps to write captions for. Missing = original six. */
+  enabled_platforms?: Platform[];
 }
 
 export interface Profile {
@@ -100,7 +137,7 @@ export interface Idea {
   created_at: string;
 };
 
-export type Variants = Record<Platform, string>;
+export type Variants = Partial<Record<Platform, string>>;
 
 export interface Draft {
   id: number;

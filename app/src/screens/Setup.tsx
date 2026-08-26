@@ -33,6 +33,8 @@ import { PLAN_COPY, VIDEO_CREDIT_PACKS, tierAtLeast } from "../lib/plans";
 import { useLocale } from "../lib/i18n";
 import { OUTPUT_LANGUAGES } from "../lib/languages";
 import { PLATFORM_LABELS, type BrandTraits, type Connections, type Me, type Platform } from "../lib/types";
+import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
+import PlatformPicker from "../lib/PlatformPicker";
 import { prepareMedia } from "../lib/media";
 import GoogleButton from "../lib/GoogleButton";
 
@@ -42,6 +44,7 @@ const VIBE_OPTIONS = ["Hype & energetic", "Calm & authentic", "Funny & playful",
 const EMOJI_OPTIONS = ["None", "Light (1-2 per post)", "Expressive"];
 const CTA_OPTIONS = ["Ask a question", "Follow for more", "Link in bio", "Soft / none"];
 const LINKABLE: Platform[] = ["facebook", "instagram", "tiktok", "linkedin"];
+const ACCOUNT_ROW_PLATFORMS: Platform[] = ["x", "facebook", "instagram", "tiktok", "linkedin", "snapchat"];
 
 const TIER_LABELS: Record<string, string> = { free: "Free", creator: "Creator", studio: "Studio" };
 
@@ -205,6 +208,7 @@ export default function Setup() {
         never_use: t.never_use || [],
         always_use: t.always_use || [],
         example_posts: (t.example_posts || []).slice(0, EXAMPLE_CAP),
+        enabled_platforms: normalizeEnabledPlatforms(t.enabled_platforms),
       },
       watermarkUrl: next?.watermarkUrl !== undefined ? next.watermarkUrl : watermarkUrl,
     });
@@ -244,6 +248,7 @@ export default function Setup() {
           never_use: nextTraits.never_use || [],
           always_use: nextTraits.always_use || [],
           example_posts: (nextTraits.example_posts || []).slice(0, EXAMPLE_CAP),
+          enabled_platforms: normalizeEnabledPlatforms(nextTraits.enabled_platforms),
         },
         watermarkUrl: nextWm,
       })
@@ -261,6 +266,7 @@ export default function Setup() {
       never_use: (traits.never_use || []).map((x) => x.trim()).filter(Boolean).slice(0, LIST_CAP),
       always_use: (traits.always_use || []).map((x) => x.trim()).filter(Boolean).slice(0, LIST_CAP),
       example_posts: (traits.example_posts || []).map((x) => x.trim()).filter(Boolean).slice(0, EXAMPLE_CAP),
+      enabled_platforms: normalizeEnabledPlatforms(traits.enabled_platforms),
     };
   }
 
@@ -547,7 +553,7 @@ export default function Setup() {
       {scanning && <QrScanner onResult={handleScan} onClose={() => setScanning(false)} />}
       <div className="header">
         <h1>
-          <span className="eyebrow">Brand Studio · v2.8.1</span>
+          <span className="eyebrow">Brand Studio · v2.9.0</span>
           {t("setup.title")}
         </h1>
         <span className="sub">{isVoiceSupported() ? t("voice ready") : t("voice: use Chrome / Safari")}</span>
@@ -866,6 +872,12 @@ export default function Setup() {
           onChange={(e) => setVoice(e.target.value)}
           disabled={!connected}
         />
+        <label>{t("Apps you post to")}</label>
+        <PlatformPicker
+          selected={normalizeEnabledPlatforms(traits.enabled_platforms)}
+          onChange={(next) => setTraits({ ...traits, enabled_platforms: next })}
+          disabled={!connected}
+        />
         <label>{t("Content style")}</label>
         <div className="chip-row">
           {STYLE_OPTIONS.map((o) => (
@@ -1128,11 +1140,11 @@ export default function Setup() {
           </div>
           <p className="card-desc">
             {t("Guided Share from Drafts works on every plan.")}{" "}
-            {t("X can connect when available for Creator+. Instagram, TikTok, Facebook and LinkedIn connects — plus live metrics — are coming soon.")}
+            {t("X can connect when available for Creator+. Instagram, TikTok, Facebook and LinkedIn connects — plus live metrics — are coming soon. Grok / Grokbot, YouTube Shorts, Reddit, Threads, Pinterest and Nextdoor use Share from Drafts.")}
           </p>
           <div className="conn-list">
-            {(Object.keys(conns.providers) as Platform[]).map((p) => {
-              const providerStatus = conns.providers[p];
+            {ACCOUNT_ROW_PLATFORMS.map((p) => {
+              const providerStatus = conns.providers[p] || "unsupported";
               const active = conns.connected.find((c) => c.platform === p);
               return (
                 <div className="conn-row" key={p}>

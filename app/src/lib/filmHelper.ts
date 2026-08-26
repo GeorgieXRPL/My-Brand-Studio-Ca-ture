@@ -1,7 +1,7 @@
 import type { Platform } from "./types";
 
 /** Platforms where a short-form film helper is useful. */
-export const FILM_PLATFORMS: Platform[] = ["tiktok", "instagram", "snapchat"];
+export const FILM_PLATFORMS: Platform[] = ["tiktok", "instagram", "snapchat", "youtube"];
 
 export type FilmGuide = {
   hook: string;
@@ -88,7 +88,7 @@ export function formatTalkTrackCopy(talkTrack: string, voiceId?: string | null):
 }
 
 const LABEL =
-  /^(hook|beat\s*\d*|on[-\s]?screen|on\s*screen|caption|keyword|visual|spoken|search|imagine|prompt)\s*[:\-–]\s*/i;
+  /^(hook|beat\s*\d*|on[-\s]?screen|on\s*screen|caption|keyword|visual|spoken|search|imagine|prompt|title)\s*[:\-–]\s*/i;
 
 function cleanLine(line: string): string {
   return line.replace(LABEL, "").replace(/^[\d]+[\).\]]\s*/, "").replace(/^[-*•]\s*/, "").trim();
@@ -162,6 +162,9 @@ export function buildFilmGuide(raw: string, platform: Platform): FilmGuide | nul
     }
     if (/^keyword\b|^search\b/i.test(line)) {
       keyword = body;
+      continue;
+    }
+    if (/^title\b/i.test(line)) {
       continue;
     }
     if (/^#\w+/.test(body) && body.split(/\s+/).every((w) => w.startsWith("#"))) continue;
