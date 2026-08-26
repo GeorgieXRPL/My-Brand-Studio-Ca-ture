@@ -36,7 +36,6 @@ export function providerStatus() {
     tiktok: viaUnified,
     linkedin: viaUnified,
     snapchat: shareOnly,
-    grok: shareOnly,
     youtube: shareOnly,
     reddit: shareOnly,
     threads: shareOnly,

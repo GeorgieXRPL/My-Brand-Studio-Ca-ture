@@ -14,7 +14,6 @@ export const DEFAULT_ENABLED_PLATFORMS = [
 
 export const PLATFORMS = [
   ...DEFAULT_ENABLED_PLATFORMS,
-  "grok",
   "youtube",
   "reddit",
   "threads",
@@ -41,8 +40,6 @@ const GUIDANCE = {
     "prefer a Reels-ready block when the idea is visual — same HOOK / BEAT / ON_SCREEN / KEYWORD / CAPTION labels as TikTok when it fits; otherwise a caption with a hook line, 2-4 short lines of value, a CTA for saves/DMs, and 5-10 hashtags on a new line.",
   linkedin:
     "a professional but human post. Strong first line (dwell), short paragraphs, one clear insight or story, soft CTA for comments/saves. No hashtag spam; avoid leading with an external link.",
-  grok:
-    "a short Grok / Grokbot post: witty, specific, one idea. 1-3 sentences max. Sounds like a sharp reply, not an ad. No hashtag dump. Fine to invite a follow-up question.",
   youtube: `a YouTube Shorts package using this labeled format:
   HOOK: (spoken in first 1s, on-camera or VO)
   BEAT 1: …

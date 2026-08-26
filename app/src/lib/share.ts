@@ -41,7 +41,6 @@ const CAPTION_PASTE_PLATFORMS: Platform[] = [
   "facebook",
   "x",
   "linkedin",
-  "grok",
   "youtube",
   "reddit",
   "threads",

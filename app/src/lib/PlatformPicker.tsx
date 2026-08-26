@@ -19,7 +19,7 @@ export default function PlatformPicker({
     <div className="platform-picker">
       {!compact && (
         <p className="card-desc" style={{ marginTop: 0 }}>
-          {t("Draft now only writes for the apps you turn on. Share still lets you pick at send time. Grok / Grokbot is the Grok app — the Writer chips (Grok vs Claude) only choose who drafts the words.")}
+          {t("Draft now only writes for the apps you turn on. Share still lets you pick at send time.")}
         </p>
       )}
       <div className="chip-row">

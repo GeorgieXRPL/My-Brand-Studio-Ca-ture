@@ -18,17 +18,17 @@ test("unknown platforms are dropped; empty falls back to original six", () => {
 
 test("request override wins over saved traits", () => {
   assert.deepEqual(
-    resolveEnabledPlatforms({ enabled_platforms: ["x", "linkedin"] }, ["grok", "youtube"]),
-    ["grok", "youtube"]
+    resolveEnabledPlatforms({ enabled_platforms: ["x", "linkedin"] }, ["reddit", "youtube"]),
+    ["reddit", "youtube"]
   );
 });
 
-test("grok, youtube, reddit are first-class destinations", () => {
-  assert.ok(PLATFORMS.includes("grok"));
+test("youtube and reddit are first-class destinations; grok is not a post target", () => {
+  assert.ok(!PLATFORMS.includes("grok"));
   assert.ok(PLATFORMS.includes("youtube"));
   assert.ok(PLATFORMS.includes("reddit"));
   const g = platformGuidanceFor(["grok", "youtube", "reddit"]);
-  assert.match(g, /grok:/);
+  assert.ok(!g.includes("- grok:"));
   assert.match(g, /youtube:/);
   assert.match(g, /reddit:/);
   assert.ok(!g.includes("- tiktok:"));

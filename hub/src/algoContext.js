@@ -25,8 +25,6 @@ export function algoKnowledgeAsOf(date = new Date()) {
         "LLM interest-graph hybrid (2026). Saves and substantive comments (3+ sentences) outweigh reactions. First lines must earn dwell; external links often suppress reach. Documents/carousels and expert POV perform well.",
       snapchat:
         "Ephemeral + Spotlight. Authenticity and early engagement; keep captions short and visual-first. Spotlight rewards watch-through on short vertical video.",
-      grok:
-        "Grok / Grokbot: short, specific, reply-shaped posts. Witty beats generic. Invite a follow-up; avoid hashtag dumps and ad-speak.",
       youtube:
         "Shorts: hook in the first second, spoken keywords for search, completion and rewatches. Title is searchable; description supports a few tags, not a dump.",
       reddit:

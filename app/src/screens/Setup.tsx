@@ -1140,7 +1140,7 @@ export default function Setup() {
           </div>
           <p className="card-desc">
             {t("Guided Share from Drafts works on every plan.")}{" "}
-            {t("X can connect when available for Creator+. Instagram, TikTok, Facebook and LinkedIn connects — plus live metrics — are coming soon. Grok / Grokbot, YouTube Shorts, Reddit, Threads, Pinterest and Nextdoor use Share from Drafts.")}
+            {t("X can connect when available for Creator+. Instagram, TikTok, Facebook and LinkedIn connects — plus live metrics — are coming soon. YouTube Shorts, Reddit, Threads, Pinterest and Nextdoor use Share from Drafts.")}
           </p>
           <div className="conn-list">
             {ACCOUNT_ROW_PLATFORMS.map((p) => {
