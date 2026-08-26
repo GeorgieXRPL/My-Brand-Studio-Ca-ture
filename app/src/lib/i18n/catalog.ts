@@ -17,7 +17,7 @@ export const LEGACY_KEYS: Record<string, string> = {
   "capture.writing": "Shaping your words for each platform…",
   "capture.welcomeTitle": "You know what you mean. Say it out loud.",
   "capture.welcomeBody":
-    "Talk instead of staring at a blank caption. We write a post for each app — then Share opens your phone's share sheet so you pick Instagram, TikTok, and the rest.",
+    "Talk instead of staring at a blank caption. Pick the apps you post to, we write a native post for each — then Share opens your phone's share sheet.",
   "capture.welcomeCta": "Create your free account",
   "capture.listening": "Listening… tap to stop",
   "capture.tapMic": "Tap the mic and talk",

@@ -30,7 +30,7 @@ export function imagineMonthlyLimit() {
   return Number.isFinite(n) && n > 0 ? n : 8;
 }
 
-const FILM_POST_PLATFORMS = new Set(["tiktok", "instagram", "snapchat"]);
+const FILM_POST_PLATFORMS = new Set(["tiktok", "instagram", "snapchat", "youtube"]);
 
 export function parseFilmLabels(raw) {
   const text = (raw || "").trim();

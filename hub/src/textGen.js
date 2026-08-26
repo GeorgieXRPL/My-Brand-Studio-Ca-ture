@@ -7,12 +7,13 @@ import { algoKnowledgeAsOf } from "./algoContext.js";
 import { resolveOutputLanguage } from "./languages.js";
 import { sanitizeCopy, sanitizeVariants } from "./sanitize.js";
 import { voiceGuideBlocks } from "./voiceGuide.js";
+import { PLATFORMS, platformGuidanceFor, resolveEnabledPlatforms } from "./platforms.js";
 
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5";
 const XAI_TEXT_MODEL = process.env.XAI_TEXT_MODEL || "grok-4.3";
 const XAI_BASE = (process.env.XAI_BASE_URL || "https://api.x.ai").replace(/\/$/, "");
 
-export const PLATFORMS = ["x", "facebook", "tiktok", "snapchat", "instagram", "linkedin"];
+export { PLATFORMS, resolveEnabledPlatforms } from "./platforms.js";
 
 const TRAIT_LABELS = {
   content_style: "Content style",
@@ -107,23 +108,6 @@ export function buildSystemPrompt(profile) {
   ].join("\n");
 }
 
-const PLATFORM_GUIDANCE = `Adapt the SAME idea natively for each platform:
-- x: a punchy post OR a short thread (use line breaks). Max ~280 chars per tweet; if a thread, separate tweets with a blank line. Conversational, hook first — write for replies and bookmarks.
-- facebook: a slightly longer, warmer post with a clear hook and a light call to engage. 1-3 short paragraphs. Sound native to FB, not a copy-paste of Instagram.
-- tiktok: a short-form VIDEO script using this exact labeled format (one line each):
-  HOOK: (spoken in first 1–1.5s)
-  BEAT 1: …
-  BEAT 2: …
-  BEAT 3: …
-  ON_SCREEN: (max 6-8 plain words for a lower-third caption — no periods, no emojis, no invented words; exact short phrase only)
-  KEYWORD: (1–3 search-friendly spoken words)
-  IMAGINE: (1–2 sentences describing visuals/motion ONLY — never mention text, captions, titles, burn-in, or on-screen words; the app stamps ON_SCREEN separately)
-  CAPTION: (short post caption + a few hashtags — this is what gets pasted when sharing, NOT the script)
-  Keep it energetic and filmable in ~15–30 seconds. Never use double hyphens (--); use commas or periods.
-- snapchat: a casual, in-the-moment caption for a snap (1-2 lines) plus a suggested visual.
-- instagram: prefer a Reels-ready block when the idea is visual — same HOOK / BEAT / ON_SCREEN / KEYWORD / CAPTION labels as TikTok when it fits; otherwise a caption with a hook line, 2-4 short lines of value, a CTA for saves/DMs, and 5-10 hashtags on a new line.
-- linkedin: a professional but human post. Strong first line (dwell), short paragraphs, one clear insight or story, soft CTA for comments/saves. No hashtag spam; avoid leading with an external link.`;
-
 async function completeClaude({ system, userText, image, maxTokens }) {
   const content = image
     ? [
@@ -202,16 +186,17 @@ async function completeText({ provider, system, userText, image, maxTokens }) {
   throw lastErr || new Error("No text AI provider available.");
 }
 
-export async function generateVariants({ topic, profile, image, isVideo, provider }) {
+export async function generateVariants({ topic, profile, image, isVideo, provider, platforms }) {
+  const targets = resolveEnabledPlatforms(profile?.traits, platforms);
   const system = buildSystemPrompt(profile);
   const mediaNote = image
     ? "\n\nThe creator ATTACHED THE IMAGE ABOVE to this idea. Look at it carefully and weave what's actually in it into every post (describe/reference the visual, don't just caption blindly)."
     : isVideo
       ? "\n\nThe creator attached a VIDEO to this idea (you can't watch it). Write posts that pair with a video: strong hooks, watch-this energy, and captions that lead into it."
       : "";
-  const userText = `RAW IDEA (spoken or typed by the creator — preserve their meaning and wording where it works):\n${topic}${mediaNote}\n\n${PLATFORM_GUIDANCE}\n\nShape this into platform-ready posts that still feel like a cleanup of what they said — not a rewrite into influencer English.\n\nReturn ONLY a JSON object (no prose, no code fences) with exactly these string keys: ${PLATFORMS.join(
+  const userText = `RAW IDEA (spoken or typed by the creator — preserve their meaning and wording where it works):\n${topic}${mediaNote}\n\n${platformGuidanceFor(targets)}\n\nShape this into platform-ready posts that still feel like a cleanup of what they said — not a rewrite into influencer English.\n\nReturn ONLY a JSON object (no prose, no code fences) with exactly these string keys: ${targets.join(
     ", "
-  )}. Each value is the finished post text for that platform.`;
+  )}. Each value is the finished post text for that platform. Omit platforms that were not requested.`;
 
   const resolved = resolveTextProvider(provider ?? profile?.traits?.text_provider);
   const { text } = await completeText({
@@ -219,12 +204,14 @@ export async function generateVariants({ topic, profile, image, isVideo, provide
     system,
     userText,
     image: image || null,
-    maxTokens: 2600,
+    maxTokens: Math.min(4200, 800 + targets.length * 280),
   });
 
   const variants = parseJsonObject(text);
   const clean = {};
-  for (const p of PLATFORMS) clean[p] = typeof variants[p] === "string" ? sanitizeCopy(variants[p]) : "";
+  for (const p of targets) {
+    clean[p] = typeof variants[p] === "string" ? sanitizeCopy(variants[p]) : "";
+  }
   return sanitizeVariants(clean);
 }
 

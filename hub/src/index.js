@@ -77,16 +77,30 @@ import { getVoiceMeta, listTtsVoices, narrationFromLabels, synthesizeSpeech, tts
 const app = express();
 app.set("trust proxy", 1);
 
-const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:5173")
+const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+function originAllowed(origin) {
+  if (!origin || allowed.includes(origin)) return true;
+  try {
+    const u = new URL(origin);
+    const hostAlt = u.hostname === "localhost" ? "127.0.0.1" : u.hostname === "127.0.0.1" ? "localhost" : null;
+    if (!hostAlt) return false;
+    const port = u.port ? `:${u.port}` : "";
+    return allowed.includes(`${u.protocol}//${hostAlt}${port}`);
+  } catch {
+    return false;
+  }
+}
 
 app.use(
   cors({
     origin(origin, cb) {
       // Allow same-origin / curl (no origin) and any explicitly allowed origin.
-      if (!origin || allowed.includes(origin)) return cb(null, true);
+      // localhost and 127.0.0.1 are treated as the same host for local dev.
+      if (originAllowed(origin)) return cb(null, true);
       return cb(new Error("Origin not allowed: " + origin));
     },
     credentials: true,
@@ -958,6 +972,7 @@ app.post("/api/generate", async (req, res) => {
         image,
         isVideo,
         provider: providerPref,
+        platforms: req.body?.platforms,
       });
     } finally {
       generateInflight--;

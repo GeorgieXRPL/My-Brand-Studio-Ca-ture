@@ -138,6 +138,7 @@ export const api = {
     idea_id?: number;
     media_url?: string;
     text_provider?: "claude" | "grok";
+    platforms?: string[];
   }) =>
     request<Draft>("/api/generate", { method: "POST", body: JSON.stringify(payload) }),
   updateDraft: (id: number, patch: { status?: string; variants?: Variants; topic?: string; media_url?: string | null }) =>
