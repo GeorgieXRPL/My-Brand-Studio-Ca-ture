@@ -21,6 +21,17 @@ export const DEFAULT_ENABLED_PLATFORMS: Platform[] = [
   "snapchat",
   "instagram",
   "linkedin",
+  "youtube",
+];
+
+/** Pre-Shorts default. Exact match is upgraded to include YouTube. */
+export const LEGACY_DEFAULT_PLATFORMS: Platform[] = [
+  "x",
+  "facebook",
+  "tiktok",
+  "snapchat",
+  "instagram",
+  "linkedin",
 ];
 
 export const PLATFORM_LABELS: Record<Platform, string> = {
@@ -68,7 +79,7 @@ export interface BrandTraits {
   always_use?: string[];
   /** Optional 2–3 example posts (capped server-side). */
   example_posts?: string[];
-  /** Apps to write captions for. Missing = original six. */
+  /** Apps to write captions for. Missing = default set (includes YouTube Shorts). */
   enabled_platforms?: Platform[];
 }
 

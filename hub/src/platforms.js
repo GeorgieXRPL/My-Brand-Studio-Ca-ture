@@ -10,11 +10,21 @@ export const DEFAULT_ENABLED_PLATFORMS = [
   "snapchat",
   "instagram",
   "linkedin",
+  "youtube",
+];
+
+/** Pre-Shorts default. Exact match is upgraded to include YouTube. */
+const LEGACY_DEFAULT_PLATFORMS = [
+  "x",
+  "facebook",
+  "tiktok",
+  "snapchat",
+  "instagram",
+  "linkedin",
 ];
 
 export const PLATFORMS = [
   ...DEFAULT_ENABLED_PLATFORMS,
-  "youtube",
   "reddit",
   "threads",
   "pinterest",
@@ -60,14 +70,21 @@ const GUIDANCE = {
 
 const ALLOWED = new Set(PLATFORMS);
 
-/** Selected destinations to generate. Falls back to the original six. */
+function isLegacyDefault(list) {
+  if (list.length !== LEGACY_DEFAULT_PLATFORMS.length) return false;
+  const set = new Set(list);
+  return LEGACY_DEFAULT_PLATFORMS.every((p) => set.has(p));
+}
+
+/** Selected destinations to generate. Falls back to the default set (includes YouTube Shorts). */
 export function resolveEnabledPlatforms(traits, override) {
   const raw = Array.isArray(override) && override.length ? override : traits?.enabled_platforms;
   const list = (Array.isArray(raw) ? raw : DEFAULT_ENABLED_PLATFORMS)
     .map((p) => String(p || "").toLowerCase().trim())
     .filter((p) => ALLOWED.has(p));
   const unique = [...new Set(list)];
-  return unique.length ? unique : [...DEFAULT_ENABLED_PLATFORMS];
+  if (!unique.length || isLegacyDefault(unique)) return [...DEFAULT_ENABLED_PLATFORMS];
+  return unique;
 }
 
 export function platformGuidanceFor(targets) {
