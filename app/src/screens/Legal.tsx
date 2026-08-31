@@ -76,6 +76,7 @@ function PrivacyBody() {
       <ul>
         <li>Account email and authentication data</li>
         <li>Google account email if you use Continue with Google</li>
+        <li>Privy user id, email, or wallet address if you use Continue with Privy</li>
         <li>Brand Brain profile (goals, voice, traits, watermark)</li>
         <li>Ideas, drafts, media you upload or generate</li>
         <li>Billing identifiers from Stripe when you subscribe</li>
@@ -84,7 +85,7 @@ function PrivacyBody() {
       <h3>Processors</h3>
       <p>
         We use Anthropic and/or xAI to generate captions and media, Stripe for payments, Google for
-        optional sign-in, and our hosting providers (e.g. Fly, Vercel) to run the service. Content you
+        optional sign-in, Privy for optional email/wallet sign-in, and our hosting providers (e.g. Fly, Vercel) to run the service. Content you
         send for generation is processed by those providers under their terms. When you create an
         account or sign in, we email our operations inbox (
         <a href="mailto:hello@mybrandstudio.club">hello@mybrandstudio.club</a>

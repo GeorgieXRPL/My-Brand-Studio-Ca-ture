@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   api,
@@ -37,6 +37,14 @@ import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import PlatformPicker from "../lib/PlatformPicker";
 import { prepareMedia } from "../lib/media";
 import GoogleButton from "../lib/GoogleButton";
+import {
+  AUTH_CHANGED_EVENT,
+  notifyAuthChanged,
+  privyEnabled,
+  requestPrivyLogout,
+} from "../lib/privy-env";
+
+const PrivyButton = lazy(() => import("../lib/PrivyButton"));
 
 const STYLE_OPTIONS = ["Educational", "Entertaining", "Inspirational", "Behind-the-scenes", "Storytelling", "Contrarian"];
 const TYPE_OPTIONS = ["Short video", "Photo posts", "Threads", "Carousels", "Live/streams", "Long-form"];
@@ -145,6 +153,14 @@ export default function Setup() {
       .authProviders()
       .then((p) => setGoogleAvailable(p.google))
       .catch(() => {});
+
+    const onAuthChanged = () => {
+      const email = getAuthEmail();
+      setSignedInAs(isSelfHost() ? "" : email);
+      if (email && isConfigured()) loadProfile();
+    };
+    window.addEventListener(AUTH_CHANGED_EVENT, onAuthChanged);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, onAuthChanged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -473,6 +489,8 @@ export default function Setup() {
       /* ignore */
     }
     clearAuth();
+    requestPrivyLogout();
+    notifyAuthChanged();
     setSignedInAs("");
     setConnected(false);
     toast(t("Signed out"));
@@ -746,15 +764,28 @@ export default function Setup() {
           ) : (
             <>
               <p className="card-desc">{t("Speak an idea. Get posts for every platform. Free to start.")}</p>
-              {googleAvailable && (
+              {privyEnabled() && (
+                <>
+                  <Suspense fallback={<button type="button" className="btn privy-btn block" disabled />}>
+                    <PrivyButton />
+                  </Suspense>
+                  <p className="muted small" style={{ marginTop: 8, textAlign: "center" }}>
+                    {t("By continuing you agree to the")}{" "}
+                    <Link to="/terms">{t("Terms")}</Link> {t("and")} <Link to="/privacy">{t("Privacy Policy")}</Link>.
+                  </p>
+                </>
+              )}
+              {googleAvailable && !privyEnabled() && (
                 <>
                   <GoogleButton />
                   <p className="muted small" style={{ marginTop: 8, textAlign: "center" }}>
                     {t("By continuing with Google you agree to the")}{" "}
                     <Link to="/terms">{t("Terms")}</Link> {t("and")} <Link to="/privacy">{t("Privacy Policy")}</Link>.
                   </p>
-                  <div className="auth-divider">{t("or use email")}</div>
                 </>
+              )}
+              {(privyEnabled() || googleAvailable) && (
+                <div className="auth-divider">{t("or use email")}</div>
               )}
               <form
                 className="auth-form"

@@ -10,6 +10,7 @@ import {
   createSession,
   destroySession,
   findOrCreateGoogleUser,
+  findOrCreatePrivyUser,
   getUser,
   login,
   noteAuthEvent,
@@ -73,6 +74,13 @@ import {
 } from "./admin.js";
 import { syncCryptoDeposits } from "./cryptoWatch.js";
 import { getVoiceMeta, listTtsVoices, narrationFromLabels, synthesizeSpeech, ttsConfigured } from "./tts.js";
+import {
+  emailFromPrivyProfile,
+  fetchPrivyUser,
+  privyConfigured,
+  syntheticPrivyEmail,
+  verifyPrivyAccessToken,
+} from "./privy.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -184,7 +192,33 @@ app.post("/api/auth/login", rateLimit, wrap((req, res) => {
 
 // Which sign-in methods this server supports (drives the app's UI).
 app.get("/api/auth/providers", (_req, res) => {
-  res.json({ password: true, google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) });
+  res.json({
+    password: true,
+    google: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    privy: privyConfigured(),
+  });
+});
+
+app.post("/api/auth/privy", rateLimit, async (req, res) => {
+  try {
+    const did = await verifyPrivyAccessToken(req.body?.access_token);
+    const profile = await fetchPrivyUser(did);
+    const email = emailFromPrivyProfile(profile) || syntheticPrivyEmail(did);
+    const user = findOrCreatePrivyUser(did, email, {
+      refCode: String(req.body?.ref || "").trim().slice(0, 32),
+    });
+    const token = createSession(user.id);
+    noteAuthEvent({
+      userId: user.id,
+      email: user.email,
+      method: "privy",
+      isNew: Boolean(user.created),
+    });
+    res.status(user.created ? 201 : 200).json({ token, email: user.email });
+  } catch (err) {
+    console.error("[privy]", err.message);
+    res.status(err.status || 500).json({ error: err.message || "Privy sign-in failed" });
+  }
 });
 
 // ---- Google sign-in (OAuth 2.0 code flow) ----

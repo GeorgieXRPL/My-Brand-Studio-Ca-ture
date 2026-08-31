@@ -120,7 +120,15 @@ export const api = {
       method: "POST",
       body: "{}",
     }),
-  authProviders: () => request<{ password: boolean; google: boolean }>("/api/auth/providers"),
+  authProviders: () => request<{ password: boolean; google: boolean; privy: boolean }>("/api/auth/providers"),
+  privyLogin: (accessToken: string, ref?: string) =>
+    request<{ token: string; email: string }>("/api/auth/privy", {
+      method: "POST",
+      body: JSON.stringify({
+        access_token: accessToken,
+        ref: ref || undefined,
+      }),
+    }),
 
   getProfile: () => request<Profile>("/api/profile"),
   saveProfile: (p: Profile) => request<Profile>("/api/profile", { method: "PUT", body: JSON.stringify(p) }),

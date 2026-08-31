@@ -41,7 +41,7 @@ export async function notifyOwner({ subject, text }) {
  */
 export function recordAuthEvent({ userId, email, method, isNew }) {
   const ts = new Date().toISOString();
-  const source = method === "google" ? "google" : "password";
+  const source = method === "google" ? "google" : method === "privy" ? "privy" : "password";
   const row = {
     email: String(email || "").trim().toLowerCase(),
     userId,
@@ -49,7 +49,7 @@ export function recordAuthEvent({ userId, email, method, isNew }) {
     isNew: Boolean(isNew),
     ts,
   };
-  if (!row.email || row.email.endsWith("@selfhost.local")) return;
+  if (!row.email || row.email.endsWith("@selfhost.local") || row.email.endsWith(".invalid")) return;
 
   return row;
 }
@@ -68,7 +68,7 @@ export function ownerInbox() {
 
 export function formatAuthMail({ email, method, isNew, userId, ts }) {
   const kind = isNew ? "New signup" : "Login";
-  const via = method === "google" ? "Google" : "email";
+  const via = method === "google" ? "Google" : method === "privy" ? "Privy" : "email";
   return {
     subject: `${kind}: ${email} (${via})`,
     text: [

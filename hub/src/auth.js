@@ -92,9 +92,12 @@ export function applyReferral(newUserId, refCode) {
 export function login(email, password) {
   email = (email || "").trim().toLowerCase();
   const user = db
-    .prepare("SELECT id, email, password_hash, disabled_at FROM users WHERE email = ?")
+    .prepare("SELECT id, email, password_hash, privy_did, disabled_at FROM users WHERE email = ?")
     .get(email);
   if (user && user.id !== 1 && !user.password_hash) {
+    if (user.privy_did) {
+      throw httpError(400, "This account uses Privy sign-in — tap Continue with Privy.");
+    }
     throw httpError(400, "This account uses Google sign-in - tap Continue with Google.");
   }
   if (!user || !verifyPassword(password || "", user.password_hash)) {
@@ -158,6 +161,48 @@ export function findOrCreateGoogleUser(email, { refCode } = {}) {
       "INSERT INTO users (email, password_hash, created_at, terms_accepted_at) VALUES (?, NULL, ?, ?)"
     )
     .run(email, ts, ts);
+  const userId = Number(info.lastInsertRowid);
+  bootstrapUser(userId);
+  applyReferral(userId, refCode);
+  return { id: userId, email, created: true };
+}
+
+// Privy-verified identity: link by DID, then by email, else create
+// a password-less account (they'll sign in via Privy after that).
+export function findOrCreatePrivyUser(did, email, { refCode } = {}) {
+  did = String(did || "").trim();
+  if (!did.startsWith("did:privy:")) throw httpError(401, "Invalid Privy session.");
+  email = (email || "").trim().toLowerCase();
+  if (!email) throw httpError(400, "Privy account has no email or wallet to identify you.");
+
+  const byDid = db
+    .prepare("SELECT id, email, disabled_at FROM users WHERE privy_did = ?")
+    .get(did);
+  if (byDid) {
+    if (byDid.disabled_at) throw httpError(403, "This account has been disabled.");
+    return { id: byDid.id, email: byDid.email, created: false };
+  }
+
+  const existing = db
+    .prepare("SELECT id, email, privy_did, disabled_at FROM users WHERE email = ?")
+    .get(email);
+  if (existing) {
+    if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
+    if (existing.privy_did && existing.privy_did !== did) {
+      throw httpError(409, "That email is already linked to a different account.");
+    }
+    if (!existing.privy_did) {
+      db.prepare("UPDATE users SET privy_did = ? WHERE id = ?").run(did, existing.id);
+    }
+    return { id: existing.id, email: existing.email, created: false };
+  }
+
+  const ts = now();
+  const info = db
+    .prepare(
+      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at, privy_did) VALUES (?, NULL, ?, ?, ?)"
+    )
+    .run(email, ts, ts, did);
   const userId = Number(info.lastInsertRowid);
   bootstrapUser(userId);
   applyReferral(userId, refCode);

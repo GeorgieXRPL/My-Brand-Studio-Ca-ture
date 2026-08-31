@@ -269,6 +269,12 @@ if (!hasColumn("users", "disabled_at")) {
 if (!hasColumn("users", "last_login_at")) {
   db.exec("ALTER TABLE users ADD COLUMN last_login_at TEXT");
 }
+if (!hasColumn("users", "privy_did")) {
+  db.exec("ALTER TABLE users ADD COLUMN privy_did TEXT");
+}
+db.exec(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_privy_did ON users (privy_did) WHERE privy_did IS NOT NULL"
+);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS contacts (

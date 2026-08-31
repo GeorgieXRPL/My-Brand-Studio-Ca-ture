@@ -1641,6 +1641,22 @@ label {
   background: #f8fafc;
 }
 
+.privy-btn {
+  margin-top: 14px;
+  background: var(--brand);
+  color: #fff;
+  border: 1px solid var(--brand-deep);
+  font-weight: 700;
+  gap: 10px;
+}
+.privy-btn:hover {
+  filter: none;
+  background: var(--brand-deep);
+}
+.privy-btn:disabled {
+  opacity: 0.55;
+}
+
 /* ---------- Media ---------- */
 .media-preview {
   display: flex;

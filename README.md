@@ -129,7 +129,7 @@ The default weekly rhythm (edit in `hub/src/db.js` seed, or via the API):
 
 ## Hosted mode (the product)
 
-The hub also runs as a multi-tenant service (currently at `https://brand-studio-hub.fly.dev`, deployed from `hub/` with `fly deploy`). Users create an account in the app (email + password) and never see a server. **Self-hosted server pairing is a Studio-plan unlock** (Setup → Studio tools).
+The hub also runs as a multi-tenant service (currently at `https://brand-studio-hub.fly.dev`, deployed from `hub/` with `fly deploy`). Users create an account in the app (Privy, Google, or email + password) and never see a server. **Self-hosted server pairing is a Studio-plan unlock** (Setup → Studio tools).
 
 - Per-user data isolation, session tokens, login rate limiting.
 - Fly secrets: `ANTHROPIC_API_KEY`, `HUB_TOKEN` (owner/agent access). Env: see `hub/fly.toml`.

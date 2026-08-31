@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, isConfigured } from "../lib/api";
 import GoogleButton from "../lib/GoogleButton";
+import { AUTH_CHANGED_EVENT, privyEnabled } from "../lib/privy-env";
 import { isVoiceSupported, startlistening, type VoiceController } from "../lib/voice";
 import { useToast } from "../lib/toast";
 import { BulbIcon, CameraIcon, FlameIcon, ImageIcon, MicIcon, SparkIcon, StopIcon, TrashIcon, XCircleIcon } from "../lib/icons";
@@ -17,6 +18,8 @@ import { useLocale, useT } from "../lib/i18n";
 import type { Idea, Platform, Profile } from "../lib/types";
 import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import PlatformPicker from "../lib/PlatformPicker";
+
+const PrivyButton = lazy(() => import("../lib/PrivyButton"));
 
 const INSIGHTS_PROMO_KEY = "bs.insightsPromo.dismissed";
 
@@ -68,7 +71,7 @@ export default function Capture() {
   const [orbBurst, setOrbBurst] = useState(false);
   const [showInsightsPromo, setShowInsightsPromo] = useState(insightsPromoVisible);
   const [googleAvailable, setGoogleAvailable] = useState(false);
-  const configured = isConfigured();
+  const [configured, setConfigured] = useState(isConfigured);
 
   function dismissInsightsPromo() {
     try {
@@ -92,16 +95,12 @@ export default function Capture() {
   }, []);
 
   useEffect(() => {
-    if (configured) {
-      loadIdeas();
-      Promise.all([api.getProfile(), api.getDrafts()])
-        .then(([p, drafts]) => {
-          setProfile(p);
-          setDraftCount(drafts.length);
-          if (p.traits?.preferred_language) setLocale(p.traits.preferred_language);
-        })
-        .catch(() => {});
-    }
+    const sync = () => setConfigured(isConfigured());
+    window.addEventListener(AUTH_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(AUTH_CHANGED_EVENT, sync);
+  }, []);
+
+  useEffect(() => {
     api.authProviders().then((p) => setGoogleAvailable(p.google)).catch(() => {});
     // Content shared into the app from other apps (Web Share Target).
     const shared = [params.get("title"), params.get("text"), params.get("url")].filter(Boolean).join("\n");
@@ -110,17 +109,26 @@ export default function Capture() {
       setParams({}, { replace: true });
       toast(t("Shared content added — draft it or save it"));
     }
-    // Tour only after sign-in so first-timers aren't coached before they have an account.
-    if (configured && shouldShowTour()) {
-      const t = window.setTimeout(() => setShowTour(true), 600);
-      return () => {
-        window.clearTimeout(t);
-        controller.current?.stop();
-      };
-    }
     return () => controller.current?.stop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!configured) return;
+    loadIdeas();
+    Promise.all([api.getProfile(), api.getDrafts()])
+      .then(([p, drafts]) => {
+        setProfile(p);
+        setDraftCount(drafts.length);
+        if (p.traits?.preferred_language) setLocale(p.traits.preferred_language);
+      })
+      .catch(() => {});
+    if (shouldShowTour()) {
+      const timer = window.setTimeout(() => setShowTour(true), 600);
+      return () => window.clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configured]);
 
   useEffect(() => {
     if (!configured) {
@@ -348,13 +356,20 @@ export default function Capture() {
             <li>{t("Tell Brand Brain who you talk to — and how you sound")}</li>
             <li>{t("Tap the mic, tap Draft now, then Share from Drafts")}</li>
           </ol>
-          {googleAvailable && (
+          {privyEnabled() && (
+            <div style={{ marginBottom: 10 }}>
+              <Suspense fallback={<button type="button" className="btn privy-btn block" disabled />}>
+                <PrivyButton />
+              </Suspense>
+            </div>
+          )}
+          {googleAvailable && !privyEnabled() && (
             <div style={{ marginBottom: 10 }}>
               <GoogleButton />
             </div>
           )}
           <Link to="/setup" className="btn primary block" style={{ textDecoration: "none" }}>
-            {googleAvailable ? t("Or use email") : t("capture.welcomeCta")}
+            {privyEnabled() || googleAvailable ? t("Or use email") : t("capture.welcomeCta")}
           </Link>
         </div>
       )}
