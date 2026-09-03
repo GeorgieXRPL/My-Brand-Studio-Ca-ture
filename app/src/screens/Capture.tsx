@@ -5,7 +5,7 @@ import GoogleButton from "../lib/GoogleButton";
 import { AUTH_CHANGED_EVENT, privyEnabled } from "../lib/privy-env";
 import { isVoiceSupported, startlistening, type VoiceController } from "../lib/voice";
 import { useToast } from "../lib/toast";
-import { BulbIcon, CameraIcon, FlameIcon, ImageIcon, MicIcon, SparkIcon, StopIcon, TrashIcon, XCircleIcon } from "../lib/icons";
+import { BulbIcon, CameraIcon, FlameIcon, ImageIcon, MicIcon, MonitorIcon, SparkIcon, StopIcon, TrashIcon, XCircleIcon } from "../lib/icons";
 import Tour, { shouldShowTour } from "../lib/Tour";
 import Checklist, { dismissChecklist, shouldShowChecklist } from "../lib/Checklist";
 import { queueCelebration } from "../lib/Confetti";
@@ -323,14 +323,20 @@ export default function Capture() {
           <span className="eyebrow">Brand Studio</span>
           {t("capture.title")}
         </h1>
-        {streak > 1 ? (
-          <span className="streak-chip">
-            <FlameIcon size={15} />
-            {t("capture.streak", { n: streak })}
-          </span>
-        ) : (
-          <span className="sub">{t("capture.sub")}</span>
-        )}
+        <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <Link to="/desk" className="btn ghost sm desk-jump">
+            <MonitorIcon size={15} />
+            Desk
+          </Link>
+          {streak > 1 ? (
+            <span className="streak-chip">
+              <FlameIcon size={15} />
+              {t("capture.streak", { n: streak })}
+            </span>
+          ) : (
+            <span className="sub">{t("capture.sub")}</span>
+          )}
+        </div>
       </div>
 
       {showChecklist && (
@@ -491,7 +497,7 @@ export default function Capture() {
                 compact
                 selected={normalizeEnabledPlatforms(profile?.traits?.enabled_platforms)}
                 onChange={(next) => void setEnabledPlatforms(next)}
-                disabled={busy || !profile}
+                disabled={busy}
               />
             </div>
           )}

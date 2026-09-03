@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CameraIcon, StopIcon, VideoIcon, XCircleIcon } from "./icons";
+import { CameraIcon, StopIcon, SwitchCameraIcon, VideoIcon, XCircleIcon } from "./icons";
 import { useT } from "./i18n";
 
 type Mode = "photo" | "video";
+type Facing = "user" | "environment";
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
@@ -12,6 +13,39 @@ type ZoomCaps = { min: number; max: number } | null;
 
 function touchDist(a: Touch, b: Touch) {
   return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+function defaultFacing(): Facing {
+  if (typeof navigator === "undefined") return "user";
+  return /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "environment" : "user";
+}
+
+function stopStream(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop());
+}
+
+function isFrontTrack(track: MediaStreamTrack | undefined, requested: Facing): boolean {
+  const mode = track?.getSettings?.().facingMode;
+  if (mode === "user" || mode === "environment") return mode === "user";
+  return requested === "user";
+}
+
+async function pickDeviceId(want: Facing): Promise<string | null> {
+  if (!navigator.mediaDevices?.enumerateDevices) return null;
+  try {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    if (!cams.length) return null;
+    const hit = cams.find((d) => {
+      const n = d.label.toLowerCase();
+      if (!n) return false;
+      return want === "user"
+        ? /front|user|face|facetime|webcam/.test(n)
+        : /back|rear|environment|wide|ultra/.test(n);
+    });
+    return hit?.deviceId || null;
+  } catch {
+    return null;
+  }
 }
 
 export default function CameraCapture({
@@ -30,6 +64,8 @@ export default function CameraCapture({
   const aliveRef = useRef(true);
   const zoomRef = useRef(1);
   const hwZoomRef = useRef<ZoomCaps>(null);
+  const facingRef = useRef<Facing>(defaultFacing());
+  const frontRef = useRef(facingRef.current === "user");
   const pinchRef = useRef<{ active: boolean; startDist: number; startZoom: number }>({
     active: false,
     startDist: 0,
@@ -37,10 +73,25 @@ export default function CameraCapture({
   });
 
   const [mode, setMode] = useState<Mode>("photo");
+  const [facing, setFacing] = useState<Facing>(defaultFacing);
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [canFlip, setCanFlip] = useState(true);
+
+  facingRef.current = facing;
+
+  function previewTransform(): string {
+    const mirror = frontRef.current ? "scaleX(-1)" : "";
+    const z = !hwZoomRef.current && zoomRef.current > 1.01 ? `scale(${zoomRef.current})` : "";
+    return [mirror, z].filter(Boolean).join(" ");
+  }
+
+  function applyPreviewTransform() {
+    const video = videoRef.current;
+    if (video) video.style.transform = previewTransform();
+  }
 
   useEffect(() => {
     aliveRef.current = true;
@@ -51,10 +102,7 @@ export default function CameraCapture({
 
   useEffect(() => {
     zoomRef.current = zoom;
-    const video = videoRef.current;
-    if (video && !hwZoomRef.current) {
-      video.style.transform = `scale(${zoom})`;
-    }
+    applyPreviewTransform();
   }, [zoom]);
 
   async function applyZoom(next: number) {
@@ -64,17 +112,19 @@ export default function CameraCapture({
 
     const track = streamRef.current?.getVideoTracks()[0];
     const caps = hwZoomRef.current;
-    if (track && caps) {
+    if (track && caps && !frontRef.current) {
       const hw = caps.min + ((clamped - MIN_ZOOM) / (MAX_ZOOM - MIN_ZOOM)) * (caps.max - caps.min);
       try {
-        await track.applyConstraints({ advanced: [{ zoom: hw } as unknown as MediaTrackConstraintSet] });
-        if (videoRef.current) videoRef.current.style.transform = "";
+        await track.applyConstraints({
+          advanced: [{ zoom: hw } as unknown as MediaTrackConstraintSet],
+        });
+        applyPreviewTransform();
         return;
       } catch {
         /* fall through to digital zoom */
       }
     }
-    if (videoRef.current) videoRef.current.style.transform = `scale(${clamped})`;
+    applyPreviewTransform();
   }
 
   useEffect(() => {
@@ -86,38 +136,61 @@ export default function CameraCapture({
       hwZoomRef.current = null;
       zoomRef.current = 1;
       setZoom(1);
-      // Soft constraints — avoid forcing 1080p which fails on some Ultra / fold sensors.
-      const attempts: MediaStreamConstraints[] = [
+      stopStream(streamRef.current);
+      streamRef.current = null;
+      // iOS will not switch lenses unless the previous tracks are fully released.
+      await new Promise((r) => window.setTimeout(r, 40));
+      if (cancelled) return;
+
+      const audio = mode === "video";
+      const want = facing;
+      const deviceId = await pickDeviceId(want);
+      const attempts: MediaStreamConstraints[] = [];
+      if (deviceId) attempts.push({ video: { deviceId: { exact: deviceId } }, audio });
+      attempts.push(
         {
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: mode === "video",
+          video: { facingMode: { ideal: want }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio,
         },
         {
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: mode === "video",
+          video: { facingMode: { ideal: want }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio,
         },
-        { video: { facingMode: "environment" }, audio: mode === "video" },
-        { video: true, audio: mode === "video" },
-      ];
+        { video: { facingMode: { ideal: want } }, audio },
+        { video: true, audio }
+      );
 
       let lastErr: unknown;
       for (const constraints of attempts) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
           if (cancelled) {
-            stream.getTracks().forEach((t) => t.stop());
+            stopStream(stream);
             return;
           }
           streamRef.current = stream;
           const track = stream.getVideoTracks()[0];
-          const caps = track?.getCapabilities?.() as MediaTrackCapabilities & { zoom?: { min: number; max: number } };
+          frontRef.current = isFrontTrack(track, want);
+          const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
+            zoom?: { min: number; max: number };
+          };
           if (caps?.zoom && typeof caps.zoom.min === "number" && caps.zoom.max > caps.zoom.min) {
             hwZoomRef.current = { min: caps.zoom.min, max: caps.zoom.max };
           }
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.style.transform = "";
-            await videoRef.current.play();
+          const video = videoRef.current;
+          if (video) {
+            video.srcObject = stream;
+            video.muted = true;
+            video.playsInline = true;
+            video.setAttribute("playsinline", "true");
+            applyPreviewTransform();
+            await video.play();
+          }
+          try {
+            const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+            setCanFlip(cams.length > 1);
+          } catch {
+            setCanFlip(true);
           }
           setReady(true);
           return;
@@ -134,7 +207,7 @@ export default function CameraCapture({
       );
     }
 
-    start();
+    void start();
     return () => {
       cancelled = true;
       const rec = recorderRef.current;
@@ -145,10 +218,10 @@ export default function CameraCapture({
           /* ignore */
         }
       }
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      stopStream(streamRef.current);
       streamRef.current = null;
     };
-  }, [mode]);
+  }, [mode, facing, t]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -195,7 +268,7 @@ export default function CameraCapture({
     if (!video || !ready) return;
     const vw = video.videoWidth || 1280;
     const vh = video.videoHeight || 720;
-    const z = hwZoomRef.current ? 1 : zoomRef.current;
+    const z = hwZoomRef.current && !frontRef.current ? 1 : zoomRef.current;
     const sw = vw / z;
     const sh = vh / z;
     const sx = (vw - sw) / 2;
@@ -203,7 +276,13 @@ export default function CameraCapture({
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(sw);
     canvas.height = Math.round(sh);
-    canvas.getContext("2d")!.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    if (frontRef.current) {
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
     canvas.toBlob(
       (blob) => {
         if (!blob || !aliveRef.current) return;
@@ -224,11 +303,7 @@ export default function CameraCapture({
       : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
         ? "video/webm;codecs=vp9"
         : "video/webm";
-    const recOpts: MediaRecorderOptions = { mimeType: mime };
-    if (typeof MediaRecorder !== "undefined") {
-      // Prefer ~6–8 Mbps when the browser honors it.
-      (recOpts as MediaRecorderOptions & { videoBitsPerSecond?: number }).videoBitsPerSecond = 7_000_000;
-    }
+    const recOpts: MediaRecorderOptions = { mimeType: mime, videoBitsPerSecond: 7_000_000 };
     const rec = new MediaRecorder(stream, recOpts);
     rec.ondataavailable = (e) => {
       if (e.data.size) chunksRef.current.push(e.data);
@@ -248,6 +323,11 @@ export default function CameraCapture({
   function stopRecording() {
     recorderRef.current?.stop();
     setRecording(false);
+  }
+
+  function flipCamera() {
+    if (recording) return;
+    setFacing((cur) => (cur === "user" ? "environment" : "user"));
   }
 
   return createPortal(
@@ -280,6 +360,7 @@ export default function CameraCapture({
             {ready && zoom > 1.02 && <div className="camera-zoom-hint">{zoom.toFixed(1)}×</div>}
           </div>
           <div className="camera-controls">
+            <span className="camera-controls-slot" />
             {mode === "photo" ? (
               <button type="button" className="camera-shutter" aria-label={t("Take photo")} onClick={snapPhoto} disabled={!ready} />
             ) : recording ? (
@@ -297,6 +378,19 @@ export default function CameraCapture({
                 <span className="rec-dot" />
               </button>
             )}
+            <div className="camera-controls-slot">
+              {canFlip && (
+                <button
+                  type="button"
+                  className="camera-flip"
+                  aria-label={t("Switch camera")}
+                  disabled={!ready || recording}
+                  onClick={flipCamera}
+                >
+                  <SwitchCameraIcon size={22} />
+                </button>
+              )}
+            </div>
           </div>
         </>
       )}

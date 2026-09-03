@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, getHubUrl, isConfigured } from "../lib/api";
+import { agentInstructions } from "../lib/agentBrief";
 import { useToast } from "../lib/toast";
 import { copyText } from "../lib/share";
 import { ChartIcon, CopyIcon, KeyIcon, PlugIcon, TrashIcon } from "../lib/icons";
@@ -9,6 +10,11 @@ import { useT } from "../lib/i18n";
 
 // Recommended agent platforms users can bring. Referral-tagged links.
 const AGENT_DIRECTORY = [
+  {
+    name: "Grok (Cursor)",
+    desc: "Paste the instructions into a Cursor Grok chat. It drafts via the hub; you approve on Desk.",
+    url: "https://app.mybrandstudio.club/desk",
+  },
   {
     name: "OpenClaw",
     desc: "Open-source personal AI agent — runs on your own machine, great first agent.",
@@ -30,24 +36,6 @@ const AGENT_DIRECTORY = [
     url: "https://zapier.com/agents?ref=brandstudio",
   },
 ];
-
-function agentInstructions(hubUrl: string): string {
-  return `You are my content agent for Brand Studio.
-Base URL: ${hubUrl}
-Auth: send header "Authorization: Bearer <MY_API_KEY>"
-
-You can:
-- GET /api/profile — my goals, projects, brand voice and traits
-- GET /api/algo/context — current (2026+) platform algorithm brief — READ THIS BEFORE writing insights
-- GET /api/ideas — my captured ideas (draft the "open" ones)
-- POST /api/generate {"topic": "..."} — turn a topic into drafts for x, facebook, tiktok, snapchat, instagram, linkedin
-- POST /api/drafts {"topic": "...", "variants": {"x": "...", "facebook": "...", "tiktok": "...", "snapchat": "...", "instagram": "...", "linkedin": "..."}} — submit drafts (approval queue)
-- POST /api/insights {"platform": "tiktok"|"instagram"|"linkedin"|"x"|"facebook"|"snapchat"|"", "title": "...", "body": "..."} — weekly content-gap + algo research
-
-Weekly duty: every week, GET /api/algo/context, then POST 1–3 insights with CURRENT algorithm advice (2025–2026 signals: dwell, completion, DM shares/saves, interest graph). Never reuse outdated 2023–2024 tips. Tailor each tip to my Brand Brain and recent drafts.
-
-Rules: you cannot publish, approve, or change settings — I review everything in the app.`;
-}
 
 export default function Agents() {
   const toast = useToast();

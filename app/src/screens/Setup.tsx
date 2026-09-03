@@ -21,6 +21,7 @@ import {
   GiftIcon,
   ImageIcon,
   KeyIcon,
+  MonitorIcon,
   PlugIcon,
   SparkIcon,
   UserIcon,
@@ -652,6 +653,10 @@ export default function Setup() {
           {signedInAs ? (
             <>
               <p className="card-desc">{signedInAs} — {t("ideas, drafts and schedule sync here.")}</p>
+              <Link to="/desk" className="btn block" style={{ textDecoration: "none", marginBottom: 12 }}>
+                <MonitorIcon size={16} />
+                Open desk
+              </Link>
               {me && (
                 <div className="tier-box">
                   <div className="row between">

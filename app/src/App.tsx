@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentType } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ToastProvider } from "./lib/toast";
 import { useT } from "./lib/i18n";
 import { BulbIcon, CalendarIcon, GearIcon, MicIcon, PenIcon } from "./lib/icons";
@@ -12,6 +12,7 @@ import Setup from "./screens/Setup";
 import Agents from "./screens/Agents";
 import Insights from "./screens/Insights";
 import Legal from "./screens/Legal";
+import Desk from "./screens/Desk";
 import { privyEnabled } from "./lib/privy-env";
 
 const tabDefs = [
@@ -34,6 +35,8 @@ function PrivyBinderHost() {
 
 export default function App() {
   const t = useT();
+  const location = useLocation();
+  const isDesk = location.pathname.startsWith("/desk");
 
   useEffect(() => {
     const ref = new URLSearchParams(window.location.search).get("ref");
@@ -42,7 +45,7 @@ export default function App() {
 
   return (
     <ToastProvider>
-      <div className="app">
+      <div className={isDesk ? "app app-desk" : "app"}>
         <Routes>
           <Route path="/" element={<Navigate to="/capture" replace />} />
           <Route path="/capture" element={<Capture />} />
@@ -54,26 +57,29 @@ export default function App() {
           <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/insights" element={<Insights />} />
+          <Route path="/desk" element={<Desk />} />
           <Route path="*" element={<Navigate to="/capture" replace />} />
         </Routes>
       </div>
       {privyEnabled() ? <PrivyBinderHost /> : null}
       <PostReminderHost />
-      <nav className="nav">
-        {tabDefs.map((tab) => (
-          <NavLink
-            key={tab.to}
-            to={tab.to}
-            data-tour={tab.tour}
-            className={({ isActive }) => (isActive ? "active" : "")}
-          >
-            <span className="nav-icon">
-              <tab.icon size={21} />
-            </span>
-            {t(tab.key)}
-          </NavLink>
-        ))}
-      </nav>
+      {isDesk ? null : (
+        <nav className="nav">
+          {tabDefs.map((tab) => (
+            <NavLink
+              key={tab.to}
+              to={tab.to}
+              data-tour={tab.tour}
+              className={({ isActive }) => (isActive ? "active" : "")}
+            >
+              <span className="nav-icon">
+                <tab.icon size={21} />
+              </span>
+              {t(tab.key)}
+            </NavLink>
+          ))}
+        </nav>
+      )}
     </ToastProvider>
   );
 }

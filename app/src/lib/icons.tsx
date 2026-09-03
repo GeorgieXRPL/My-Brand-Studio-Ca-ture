@@ -117,6 +117,15 @@ export const CameraIcon = (p: IconProps) => (
   </Svg>
 );
 
+export const SwitchCameraIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M16 7h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2" />
+    <path d="m15 4-3 3-3-3" />
+    <path d="M17 12H7" />
+    <path d="m10 9-3 3 3 3" />
+  </Svg>
+);
+
 export const SendIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="m22 2-7 20-4-9-9-4Z" />
@@ -235,6 +244,14 @@ export const ArrowRightIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M5 12h14" />
     <path d="m13 6 6 6-6 6" />
+  </Svg>
+);
+
+export const MonitorIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2" y="3" width="20" height="14" rx="2" />
+    <path d="M8 21h8" />
+    <path d="M12 17v4" />
   </Svg>
 );
 
