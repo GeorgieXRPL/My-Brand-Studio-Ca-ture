@@ -1,0 +1,49 @@
+{
+  "id": "network-marketer",
+  "name": "Network marketer",
+  "category": "Network",
+  "pitch": "Speak a real story once. Ship authentic posts all week.",
+  "default_plan": "studio",
+  "profile": {
+    "goals": "Turn real product and recruiting conversations into daily posts that sound like me, not copy-paste scripts.",
+    "projects": "Product stories, recruiting invites, weekly wins, team culture.",
+    "brand_voice": "Confident, human, story-first. Sound like a real call, not a canned script. No pressure-close language.",
+    "traits": {
+      "content_style": [
+        "Story",
+        "Tips",
+        "Energetic"
+      ],
+      "content_types": [
+        "Story",
+        "Invite",
+        "Product"
+      ],
+      "target_audience": "Prospects and downline who respond to authenticity over hype.",
+      "vibe": "Authentic, driven, approachable",
+      "emoji_usage": "moderate",
+      "cta_preference": "Conversation invite (DM / call / link)",
+      "preferred_language": "en",
+      "text_provider": "grok"
+    }
+  },
+  "capture_defaults": {
+    "apps": [
+      "instagram",
+      "facebook",
+      "tiktok",
+      "youtube_shorts",
+      "threads"
+    ],
+    "never_use": [
+      "get rich quick",
+      "guaranteed income",
+      "copy-paste script tone"
+    ],
+    "always_prefer": [
+      "real story",
+      "first person",
+      "specific detail"
+    ]
+  }
+}

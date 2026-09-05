@@ -1,0 +1,48 @@
+{
+  "id": "solo-creator",
+  "name": "Solo creator",
+  "category": "Creator",
+  "pitch": "Talk the idea. Get a native post for each app.",
+  "default_plan": "free_or_creator",
+  "profile": {
+    "goals": "Turn ideas I say out loud into native posts across platforms without dying in a blank caption box.",
+    "projects": "Clips, builds-in-public, tips, launches.",
+    "brand_voice": "Gamer / builder friendly and welcoming. Clear hooks. Energetic but not cringe.",
+    "traits": {
+      "content_style": [
+        "Entertaining",
+        "Tips",
+        "Energetic"
+      ],
+      "content_types": [
+        "Clip promo",
+        "Tip",
+        "Update"
+      ],
+      "target_audience": "Followers who watch streams, Shorts, and build-in-public content.",
+      "vibe": "Fun, clear, creator-native",
+      "emoji_usage": "moderate",
+      "cta_preference": "Watch / follow / try the app",
+      "preferred_language": "en",
+      "text_provider": "grok"
+    }
+  },
+  "capture_defaults": {
+    "apps": [
+      "tiktok",
+      "instagram",
+      "youtube_shorts",
+      "x",
+      "facebook"
+    ],
+    "never_use": [
+      "we're live coin pitch",
+      "fake scarcity"
+    ],
+    "always_prefer": [
+      "hook first",
+      "platform-native length",
+      "one clear CTA"
+    ]
+  }
+}

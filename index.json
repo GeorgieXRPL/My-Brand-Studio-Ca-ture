@@ -1,0 +1,33 @@
+{
+  "title": "Capture starter templates",
+  "inspired_by": "Bot marketplace pattern (browse \u2192 category \u2192 Add)",
+  "install_ux": "Setup or first Capture run: pick a template \u2192 Apply fills profile + apps + never/always lists",
+  "not_included": [
+    "procurement bots",
+    "fake ROI claims",
+    "community marketplace v1"
+  ],
+  "templates": [
+    {
+      "id": "smb-owner-operator",
+      "name": "SMB owner-operator",
+      "category": "SMB",
+      "pitch": "Speak what you would say over the counter.",
+      "file": "smb-owner-operator.json"
+    },
+    {
+      "id": "network-marketer",
+      "name": "Network marketer",
+      "category": "Network",
+      "pitch": "Speak a real story once. Ship authentic posts all week.",
+      "file": "network-marketer.json"
+    },
+    {
+      "id": "solo-creator",
+      "name": "Solo creator",
+      "category": "Creator",
+      "pitch": "Talk the idea. Get a native post for each app.",
+      "file": "solo-creator.json"
+    }
+  ]
+}

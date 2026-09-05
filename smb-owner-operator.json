@@ -1,0 +1,48 @@
+{
+  "id": "smb-owner-operator",
+  "name": "SMB owner-operator",
+  "category": "SMB",
+  "pitch": "Speak what you would say over the counter.",
+  "default_plan": "creator",
+  "profile": {
+    "goals": "Stay visible to local customers without hiring a marketer. Post useful, friendly updates that sound like me talking in the shop.",
+    "projects": "Weekly offers, behind-the-scenes, customer tips, community shoutouts.",
+    "brand_voice": "Warm, plainspoken, owner-operator. Short sentences. No corporate fluff. Talk like I would over the counter.",
+    "traits": {
+      "content_style": [
+        "Tips",
+        "Entertaining",
+        "Behind the scenes"
+      ],
+      "content_types": [
+        "Promo",
+        "Tip",
+        "Update"
+      ],
+      "target_audience": "Local customers and neighbors who already know the brand as a person.",
+      "vibe": "Friendly, trustworthy, practical",
+      "emoji_usage": "light",
+      "cta_preference": "Soft invite (book / stop by / DM)",
+      "preferred_language": "en",
+      "text_provider": "grok"
+    }
+  },
+  "capture_defaults": {
+    "apps": [
+      "instagram",
+      "facebook",
+      "tiktok",
+      "linkedin"
+    ],
+    "never_use": [
+      "profanity",
+      "hype jargon",
+      "guarantee claims"
+    ],
+    "always_prefer": [
+      "plain language",
+      "real customer language",
+      "clear next step"
+    ]
+  }
+}
