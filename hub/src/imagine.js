@@ -121,6 +121,26 @@ export function sanitizeImaginePrompt(prompt, { forStill = false } = {}) {
   };
 }
 
+/** 16:9 YouTube-style cover. Hub stamps the title; the model must not paint letters. */
+export function buildThumbnailPrompt({ topic, hook, onScreen, brandVoice, vibe, content_style, target_audience }) {
+  const look = [vibe, content_style, target_audience]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    .join("; ");
+  const visual = String(onScreen || hook || topic || "").trim();
+  const parts = [
+    "YouTube thumbnail, landscape 16:9, looks like 1280x720.",
+    "One subject large in the frame, high contrast, punchy lighting, readable as a tiny preview.",
+    "Leave a clean lower third for a separate title overlay.",
+    "No text, no letters, no logos, no captions, no watermarks.",
+    topic ? `Topic: ${String(topic).slice(0, 200)}.` : "",
+    visual ? `Visual focus (no text): ${visual.slice(0, 200)}.` : "",
+    brandVoice ? `Brand vibe: ${String(brandVoice).slice(0, 200)}.` : "",
+    look ? `Look and feel: ${look.slice(0, 240)}.` : "",
+  ];
+  return sanitizeImaginePrompt(parts.filter(Boolean).join(" "), { forStill: true }).prompt;
+}
+
 export function buildVideoPrompt({ topic, hook, beats, onScreen, keyword, brandVoice, vibe, content_style, target_audience }) {
   const beatLine = (beats || []).filter(Boolean).slice(0, 4).join("; ");
   const look = [vibe, content_style, target_audience]
@@ -206,10 +226,37 @@ export async function pollVideo(requestId) {
   };
 }
 
-export async function downloadBinary(url) {
+export async function downloadBinary(url, { maxBytes = 40 * 1024 * 1024 } = {}) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download generated media (${res.status})`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const declared = Number(res.headers.get("content-length") || 0);
+  if (declared > maxBytes) {
+    throw new Error("Generated media was larger than allowed.");
+  }
+  if (!res.body || typeof res.body.getReader !== "function") {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > maxBytes) throw new Error("Generated media was larger than allowed.");
+    const mime = (res.headers.get("content-type") || "video/mp4").split(";")[0].trim();
+    return { buf, mime };
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let n = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > maxBytes) {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+      throw new Error("Generated media was larger than allowed.");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  const buf = Buffer.concat(chunks, n);
   const mime = (res.headers.get("content-type") || "video/mp4").split(";")[0].trim();
   return { buf, mime };
 }

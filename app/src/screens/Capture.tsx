@@ -13,11 +13,13 @@ import CameraCapture from "../lib/CameraCapture";
 import SiriOrb from "../lib/SiriOrb";
 import Spark from "../lib/Spark";
 import { MAX_UPLOAD_BYTES, prepareMedia } from "../lib/media";
-import { speechLocaleFor } from "../lib/languages";
+import { dictationLocale } from "../lib/languages";
 import { useLocale, useT } from "../lib/i18n";
 import type { Idea, Platform, Profile } from "../lib/types";
 import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import PlatformPicker from "../lib/PlatformPicker";
+import StarterTemplatePicker from "../lib/StarterTemplatePicker";
+import { brandLooksEmpty, getStarterTemplate, profileFromStarter } from "../lib/starterTemplates";
 
 const PrivyButton = lazy(() => import("../lib/PrivyButton"));
 
@@ -130,6 +132,17 @@ export default function Capture() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configured]);
 
+  const appliedCaptureQuery = useRef(false);
+  useEffect(() => {
+    if (appliedCaptureQuery.current || !configured || !profile) return;
+    const id = params.get("template");
+    if (!id) return;
+    appliedCaptureQuery.current = true;
+    if (!brandLooksEmpty(profile)) return;
+    void applyStarter(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configured, profile]);
+
   useEffect(() => {
     if (!configured) {
       setShowChecklist(false);
@@ -140,7 +153,11 @@ export default function Capture() {
       setShowChecklist(false);
       return;
     }
-    const hasBrand = Boolean(profile?.goals?.trim() || profile?.brand_voice?.trim());
+    if (brandLooksEmpty(profile)) {
+      setShowChecklist(false);
+      return;
+    }
+    const hasBrand = !brandLooksEmpty(profile);
     const hasDraft = draftCount > 0 || ideas.some((i) => i.status === "drafted");
     setShowChecklist(shouldShowChecklist({ configured, hasBrand, hasDraft }));
   }, [configured, profile, draftCount, ideas, showTour]);
@@ -181,7 +198,7 @@ export default function Capture() {
       return;
     }
     if (!isVoiceSupported()) {
-      toast(t("Voice needs Chrome on Android or Safari on iPhone"));
+      toast(t("Voice needs Chrome or Edge on a computer, Chrome on Android, or Safari on iPhone"));
       return;
     }
     setInterim("");
@@ -201,8 +218,42 @@ export default function Capture() {
           setInterim("");
         },
       },
-      { lang: speechLocaleFor(profile?.traits?.preferred_language) }
+      { lang: dictationLocale(profile?.traits?.preferred_language) }
     );
+  }
+
+  async function applyStarter(id: string) {
+    const tpl = getStarterTemplate(id);
+    if (!configured) {
+      toast(t("Create a free account on Setup first"));
+      navigate("/setup");
+      return;
+    }
+    if (!tpl) return;
+    setBusy(true);
+    try {
+      const next = profileFromStarter(tpl);
+      const saved = await api.saveProfile({
+        goals: next.goals,
+        projects: next.projects,
+        brand_voice: next.brand_voice,
+        traits: { ...(profile?.traits || {}), ...(next.traits || {}) },
+        watermark_media_url: profile?.watermark_media_url,
+      });
+      setProfile(
+        saved || {
+          goals: next.goals,
+          projects: next.projects,
+          brand_voice: next.brand_voice,
+          traits: next.traits,
+        }
+      );
+      toast(t("Starter applied. Tap the mic when you're ready."));
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function saveIdea() {
@@ -341,13 +392,23 @@ export default function Capture() {
 
       {showChecklist && (
         <Checklist
-          hasBrand={Boolean(profile?.goals?.trim() || profile?.brand_voice?.trim())}
+          hasBrand={!brandLooksEmpty(profile)}
           hasDraft={draftCount > 0 || ideas.some((i) => i.status === "drafted")}
           onDismiss={() => {
             dismissChecklist();
             setShowChecklist(false);
           }}
         />
+      )}
+
+      {configured && profile && brandLooksEmpty(profile) && (
+        <div className="card">
+          <div className="card-title">{t("Start as")}</div>
+          <p className="card-desc">
+            {t("Pick a starter that matches how you post. It fills Brand Brain and your apps. You can rewrite every field.")}
+          </p>
+          <StarterTemplatePicker disabled={busy} onPick={(id) => void applyStarter(id)} />
+        </div>
       )}
 
       {!configured && (

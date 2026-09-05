@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { CameraIcon, StopIcon, SwitchCameraIcon, VideoIcon, XCircleIcon } from "./icons";
 import { useT } from "./i18n";
+import { enableAudioTracks, liveAudioTracks, requestMicrophone } from "./mic";
 
 type Mode = "photo" | "video";
 type Facing = "user" | "environment";
@@ -79,6 +80,7 @@ export default function CameraCapture({
   const [ready, setReady] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [canFlip, setCanFlip] = useState(true);
+  const [hasMic, setHasMic] = useState(true);
 
   facingRef.current = facing;
 
@@ -142,33 +144,63 @@ export default function CameraCapture({
       await new Promise((r) => window.setTimeout(r, 40));
       if (cancelled) return;
 
-      const audio = mode === "video";
+      const wantAudio = mode === "video";
       const want = facing;
       const deviceId = await pickDeviceId(want);
-      const attempts: MediaStreamConstraints[] = [];
-      if (deviceId) attempts.push({ video: { deviceId: { exact: deviceId } }, audio });
-      attempts.push(
+      const videoOnly: MediaStreamConstraints[] = [];
+      if (deviceId) videoOnly.push({ video: { deviceId: { exact: deviceId } }, audio: false });
+      videoOnly.push(
         {
           video: { facingMode: { ideal: want }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio,
+          audio: false,
         },
         {
           video: { facingMode: { ideal: want }, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio,
+          audio: false,
         },
-        { video: { facingMode: { ideal: want } }, audio },
-        { video: true, audio }
+        { video: { facingMode: { ideal: want } }, audio: false },
+        { video: true, audio: false }
       );
+      const attempts: MediaStreamConstraints[] = wantAudio
+        ? [
+            ...videoOnly.map((c) => ({ ...c, audio: true })),
+            ...videoOnly.map((c) => ({
+              ...c,
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            })),
+            ...videoOnly,
+          ]
+        : videoOnly;
 
       let lastErr: unknown;
+      let stream: MediaStream | null = null;
       for (const constraints of attempts) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+
+      if (stream && wantAudio && !liveAudioTracks(stream).length) {
+        try {
+          const mic = await requestMicrophone();
+          for (const t of mic.getAudioTracks()) stream.addTrack(t);
+        } catch {
+          /* record picture without sound */
+        }
+      }
+
+      if (stream) {
+        try {
           if (cancelled) {
             stopStream(stream);
             return;
           }
+          enableAudioTracks(stream);
           streamRef.current = stream;
+          setHasMic(!wantAudio || liveAudioTracks(stream).length > 0);
           const track = stream.getVideoTracks()[0];
           frontRef.current = isFrontTrack(track, want);
           const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
@@ -202,7 +234,7 @@ export default function CameraCapture({
       const e = lastErr as { name?: string };
       setError(
         e?.name === "NotAllowedError"
-          ? t("Camera access was blocked. Allow the camera for this site in your browser settings.")
+          ? t("Camera or microphone was blocked. Allow both for this site in your browser settings.")
           : t("Couldn't open the camera on this device.")
       );
     }
@@ -303,7 +335,9 @@ export default function CameraCapture({
       : MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
         ? "video/webm;codecs=vp9"
         : "video/webm";
+    enableAudioTracks(stream);
     const recOpts: MediaRecorderOptions = { mimeType: mime, videoBitsPerSecond: 7_000_000 };
+    if (liveAudioTracks(stream).length) recOpts.audioBitsPerSecond = 128_000;
     const rec = new MediaRecorder(stream, recOpts);
     rec.ondataavailable = (e) => {
       if (e.data.size) chunksRef.current.push(e.data);
@@ -358,6 +392,9 @@ export default function CameraCapture({
           <div ref={stageRef} className="camera-stage">
             <video ref={videoRef} className="camera-video" playsInline muted autoPlay />
             {ready && zoom > 1.02 && <div className="camera-zoom-hint">{zoom.toFixed(1)}×</div>}
+            {ready && mode === "video" && !hasMic && (
+              <div className="camera-mic-warn">{t("Microphone is off. Allow it for this site to record sound.")}</div>
+            )}
           </div>
           <div className="camera-controls">
             <span className="camera-controls-slot" />

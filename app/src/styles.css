@@ -1689,6 +1689,19 @@ label {
   position: relative;
   z-index: 1;
 }
+.draft-thumb-wrap {
+  margin: 0 0 12px;
+}
+.draft-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+  display: block;
+  margin-top: 6px;
+  background: #0a0a12;
+}
 
 /* ---------- Advanced toggle ---------- */
 .advanced-toggle {
@@ -1835,6 +1848,63 @@ select:disabled {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
+}
+
+.starter-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin: 8px 0 14px;
+}
+@media (min-width: 420px) {
+  .starter-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.starter-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 14px 14px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+  background: var(--surface-3);
+  color: var(--text-1);
+  cursor: pointer;
+}
+.starter-card.on {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.starter-card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.starter-cat {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cyan);
+}
+.starter-card strong {
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+.starter-pitch {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.starter-apps {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
 }
 .capture-platforms {
   margin-top: 12px;
@@ -2610,6 +2680,21 @@ select:disabled {
   font-weight: 650;
   pointer-events: none;
   letter-spacing: 0.02em;
+}
+.camera-mic-warn {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 12px;
+  z-index: 3;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
 }
 .camera-controls {
   display: grid;

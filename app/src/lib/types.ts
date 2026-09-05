@@ -158,6 +158,7 @@ export interface Draft {
   original_media_url?: string | null;
   media_mime?: string | null;
   original_media_mime?: string | null;
+  thumbnail_url?: string | null;
   created_at: string;
 }
 

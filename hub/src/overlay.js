@@ -107,6 +107,46 @@ export async function burnTextOntoImage(imageBuf, text) {
     .toBuffer();
 }
 
+function thumbnailOverlaySvg(lines, width, height) {
+  const fontSize = Math.round(height * 0.11);
+  const lineH = Math.round(fontSize * 1.18);
+  const y0 = Math.round(height * 0.78);
+  const scrimTop = Math.max(0, y0 - Math.round(fontSize * 0.7));
+  const textEls = lines
+    .map((line, i) => {
+      const y = y0 + i * lineH;
+      return `<text x="50%" y="${y}" text-anchor="middle" fill="#ffffff" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="${fontSize}" font-weight="800" letter-spacing="0.01em" style="paint-order:stroke fill;stroke:#0a0a12;stroke-width:${Math.max(6, Math.round(fontSize * 0.16))}px">${escapeXml(line)}</text>`;
+    })
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <defs>
+    <linearGradient id="thumbscrim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.62"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="${scrimTop}" width="${width}" height="${height - scrimTop}" fill="url(#thumbscrim)"/>
+  ${textEls}
+</svg>`;
+}
+
+/** Big 2-4 word title for 16:9 YouTube covers. */
+export async function burnThumbnailTitle(imageBuf, text) {
+  const clean = normalizeOnScreen(text, { maxWords: 4 });
+  if (!clean || !sharp) return imageBuf;
+  const meta = await sharp(imageBuf).metadata();
+  const width = meta.width || 1280;
+  const height = meta.height || 720;
+  const lines = wrapOverlayLines(clean, width > height ? 16 : 14);
+  if (!lines.length) return imageBuf;
+  const overlay = await svgToPng(thumbnailOverlaySvg(lines, width, height), width, height);
+  return sharp(imageBuf)
+    .composite([{ input: overlay, top: 0, left: 0 }])
+    .jpeg({ quality: 92 })
+    .toBuffer();
+}
+
 /**
  * Stamp a logo/mark in a corner (default bottom-right).
  * watermarkBuf should be PNG/WebP with transparency when possible.
@@ -337,17 +377,28 @@ export async function burnWatermarkOntoVideo(
   }
 }
 
-function runFfmpeg(args) {
+function runFfmpeg(args, { timeoutMs = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", ["-y", ...args], { stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error("ffmpeg timed out")));
+    }, timeoutMs);
     child.stderr.on("data", (d) => {
       err += d.toString();
     });
-    child.on("error", (e) => reject(e));
+    child.on("error", (e) => finish(() => reject(e)));
     child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(err.slice(-800) || `ffmpeg exited ${code}`));
+      if (code === 0) finish(() => resolve());
+      else finish(() => reject(new Error(err.slice(-800) || `ffmpeg exited ${code}`)));
     });
   });
 }

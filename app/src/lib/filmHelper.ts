@@ -26,6 +26,8 @@ export type FilmEdit = {
   watermark?: boolean;
   /** Optional TTS / delivery voice id, or "none". */
   voiceId?: string;
+  /** 2-4 word title stamped on a 16:9 thumbnail. */
+  thumbnailTitle?: string;
 };
 
 /** Voice styles for talk-track delivery + Studio AI clip narration. */
@@ -113,6 +115,16 @@ export function sanitizeClientCopy(text: string): string {
     .replace(/\s+-\s+/g, " - ")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
+}
+
+/** First 2-4 words for a YouTube thumbnail title. */
+export function thumbnailTitleFrom(text: string): string {
+  const words = String(text || "")
+    .replace(/[\u2013\u2014]/g, " ")
+    .replace(/[^\w\s']/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  return words.slice(0, 4).join(" ");
 }
 
 /**

@@ -353,6 +353,20 @@ try {
   /* older SQLite may lack partial indexes — ignore */
 }
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS stripe_events (
+    event_id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS stripe_credit_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    credits INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`);
+
 // v1 had a singleton "profile" table; move its row to the per-user "profiles".
 const hasOldProfile = db
   .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'profile'")

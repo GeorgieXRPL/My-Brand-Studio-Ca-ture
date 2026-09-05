@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildVideoPrompt } from "./imagine.js";
+import { buildThumbnailPrompt, buildVideoPrompt } from "./imagine.js";
 
 test("video prompt includes vibe/style/audience and caps voice", () => {
   const longVoice = "x".repeat(500);
@@ -30,4 +30,18 @@ test("video prompt omits never-use even if accidentally passed as voice", () => 
   });
   assert.match(prompt, /Calm & authentic/);
   assert.ok(!prompt.includes("NEVER USE"));
+});
+
+test("thumbnail prompt is 16:9 and forbids painted text", () => {
+  const prompt = buildThumbnailPrompt({
+    topic: "saturday coffee",
+    hook: "Stop scrolling",
+    onScreen: "espresso pour",
+    vibe: "Calm & authentic",
+  });
+  assert.match(prompt, /16:9/);
+  assert.match(prompt, /Do not burn/i);
+  assert.match(prompt, /saturday coffee/);
+  assert.match(prompt, /espresso pour/);
+  assert.match(prompt, /Calm & authentic/);
 });

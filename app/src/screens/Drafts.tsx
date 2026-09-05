@@ -27,6 +27,7 @@ import {
   mergeFilmEditsIntoScript,
   previewOverlayLines,
   resolveImaginePrompt,
+  thumbnailTitleFrom,
   VOICE_STYLES,
   type FilmEdit,
 } from "../lib/filmHelper";
@@ -483,9 +484,11 @@ export default function Drafts() {
             toastAt(
               job.error
                 ? job.error
-                : job.kind === "still"
-                  ? t("AI still ready — attached to this draft")
-                  : t("AI clip ready — attached to this draft"),
+                : job.kind === "thumbnail"
+                  ? t("Thumbnail ready — save it for YouTube")
+                  : job.kind === "still"
+                    ? t("AI still ready — attached to this draft")
+                    : t("AI clip ready — attached to this draft"),
               draftId
             );
             void load();
@@ -534,6 +537,7 @@ export default function Drafts() {
       burnIn: true,
       watermark: Boolean(brandWatermarkUrl),
       voiceId: "none",
+      thumbnailTitle: thumbnailTitleFrom(film.hook || film.onScreen || d.topic),
     };
   }
 
@@ -783,6 +787,57 @@ export default function Drafts() {
         return next;
       });
       toastAt(e.message || t("AI still failed"), d.id);
+    }
+  }
+
+  async function generateAiThumbnail(d: Draft, platform: Platform, film: NonNullable<ReturnType<typeof buildFilmGuide>>) {
+    noteAnchor(d.id);
+    if (!tierAtLeast(me?.tier, "creator")) {
+      toastAt(t("AI stills unlock on Creator"), d.id);
+      return;
+    }
+    try {
+      const edit = getFilmEdit(d, platform, film);
+      const title = (edit.thumbnailTitle || thumbnailTitleFrom(film.hook || film.onScreen || d.topic)).trim();
+      await saveFilmEdits(d, platform, film);
+      setImagineBusy((m) => ({ ...m, [d.id]: { jobId: 0, progress: 0, kind: "thumbnail" } }));
+      const job = await api.startImagineThumbnail({
+        draft_id: d.id,
+        platform,
+        overlay: Boolean(title),
+        overlay_text: title,
+        watermark: edit.watermark !== false,
+      });
+      if (job.thumbnail_url) {
+        setDrafts((rows) => rows.map((r) => (r.id === d.id ? { ...r, thumbnail_url: job.thumbnail_url || null } : r)));
+      }
+      setImagineBusy((m) => {
+        const next = { ...m };
+        delete next[d.id];
+        return next;
+      });
+      toastAt(t("Thumbnail ready — save it for YouTube"), d.id);
+      void load();
+      void api.imagineStatus().then((s) => setImagineInfo(s));
+    } catch (e: any) {
+      setImagineBusy((m) => {
+        const next = { ...m };
+        delete next[d.id];
+        return next;
+      });
+      toastAt(e.message || t("Thumbnail failed"), d.id);
+    }
+  }
+
+  async function saveThumbnail(url: string, draftId: number) {
+    noteAnchor(draftId);
+    try {
+      const file = await prefetchShareMedia(url);
+      if (!file) throw new Error(t("Couldn't download thumbnail"));
+      downloadShareFile(file);
+      toastAt(t("Thumbnail saved"), draftId);
+    } catch (e: any) {
+      toastAt(e.message || t("Couldn't download thumbnail"), draftId);
     }
   }
 
@@ -1223,6 +1278,20 @@ export default function Drafts() {
                     </div>
                   </>
                 )}
+                {d.thumbnail_url && (
+                  <div className="draft-thumb-wrap">
+                    <span className="muted small">{t("Thumbnail")}</span>
+                    <img className="draft-thumb" src={d.thumbnail_url} alt="" />
+                    <button
+                      type="button"
+                      className="btn sm"
+                      style={{ marginTop: 8 }}
+                      onClick={() => void saveThumbnail(d.thumbnail_url!, d.id)}
+                    >
+                      {t("Save thumbnail")}
+                    </button>
+                  </div>
+                )}
                 <p className="plat-swipe-hint">{t("Swipe for each app — Instagram, TikTok, X…")}</p>
                 <div
                   className="plat-carousel"
@@ -1406,6 +1475,21 @@ export default function Drafts() {
                           ))}
                         </div>
                       ) : null}
+                    </div>
+
+                    <div className="film-block">
+                      <span className="film-label">{t("Thumbnail title")}</span>
+                      <input
+                        value={edit.thumbnailTitle ?? thumbnailTitleFrom(film.hook || film.onScreen || d.topic)}
+                        onChange={(e) =>
+                          setFilmEditField(d.id, current, { thumbnailTitle: e.target.value }, edit)
+                        }
+                        placeholder={t("2-4 words")}
+                        maxLength={48}
+                      />
+                      <p className="film-imagine-meta" style={{ marginTop: 6 }}>
+                        {t("16:9 YouTube cover. Uses one still. Does not replace your clip.")}
+                      </p>
                     </div>
 
                     <div className="film-block">
@@ -1598,9 +1682,11 @@ export default function Drafts() {
 
                     {imagineBusy[d.id] && (
                       <div className="film-imagine-progress">
-                        {imagineBusy[d.id].kind === "still"
-                          ? t("Generating still…")
-                          : t("Generating AI clip… {n}%", { n: imagineBusy[d.id].progress || 0 })}
+                        {imagineBusy[d.id].kind === "thumbnail"
+                          ? t("Generating thumbnail…")
+                          : imagineBusy[d.id].kind === "still"
+                            ? t("Generating still…")
+                            : t("Generating AI clip… {n}%", { n: imagineBusy[d.id].progress || 0 })}
                       </div>
                     )}
                     <div className="row" style={{ marginTop: 10, gap: 8, flexWrap: "wrap" }}>
@@ -1658,6 +1744,15 @@ export default function Drafts() {
                           >
                             <SparkIcon size={15} />
                             {imagineBusy[d.id]?.kind === "still" ? t("Generating…") : t("Generate still")}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn sm block"
+                            disabled={Boolean(imagineBusy[d.id]) || imagineInfo?.configured === false || filmSaving}
+                            onClick={() => void generateAiThumbnail(d, current, film)}
+                          >
+                            <ImageIcon size={15} />
+                            {imagineBusy[d.id]?.kind === "thumbnail" ? t("Generating…") : t("Make thumbnail")}
                           </button>
                           {!tierAtLeast(me?.tier, "studio") && (imagineInfo?.videos?.credits ?? 0) <= 0 && (
                             <Link className="btn sm block" to="/setup" style={{ textDecoration: "none" }}>

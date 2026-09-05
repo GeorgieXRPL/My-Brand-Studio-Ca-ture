@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   api,
@@ -36,6 +36,8 @@ import { OUTPUT_LANGUAGES } from "../lib/languages";
 import { PLATFORM_LABELS, type BrandTraits, type Connections, type Me, type Platform } from "../lib/types";
 import { normalizeEnabledPlatforms } from "../lib/enabledPlatforms";
 import PlatformPicker from "../lib/PlatformPicker";
+import StarterTemplatePicker from "../lib/StarterTemplatePicker";
+import { brandLooksEmpty, getStarterTemplate, profileFromStarter, STARTER_TEMPLATES } from "../lib/starterTemplates";
 import { prepareMedia } from "../lib/media";
 import GoogleButton from "../lib/GoogleButton";
 import {
@@ -564,6 +566,62 @@ export default function Setup() {
     }
   }
 
+  async function applyStarter(id: string) {
+    const tpl = getStarterTemplate(id);
+    if (!tpl || !connected) {
+      if (!connected) toast(t("Sign in first."));
+      return;
+    }
+    if (!brandLooksEmpty({ goals, projects, brand_voice: voice })) {
+      const ok = window.confirm(
+        t("Replace your Brand Brain with this starter? You can edit it after it saves.")
+      );
+      if (!ok) return;
+    }
+    const next = profileFromStarter(tpl);
+    setGoals(next.goals);
+    setProjects(next.projects);
+    setVoice(next.brand_voice);
+    const nextTraits = next.traits || {};
+    setTraits(nextTraits);
+    if (nextTraits.preferred_language) setLocale(nextTraits.preferred_language);
+    setSavingProfile(true);
+    try {
+      const saved = await api.saveProfile({
+        goals: next.goals,
+        projects: next.projects,
+        brand_voice: next.brand_voice,
+        traits: nextTraits,
+        watermark_media_url: watermarkUrl,
+      });
+      applySavedProfile(
+        saved || {
+          goals: next.goals,
+          projects: next.projects,
+          brand_voice: next.brand_voice,
+          traits: nextTraits,
+          watermark_media_url: watermarkUrl,
+        }
+      );
+      toast(t("Starter applied. Tweak anything, then keep capturing."));
+    } catch (e: any) {
+      toast(e.message);
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  const appliedQuery = useRef(false);
+  useEffect(() => {
+    if (appliedQuery.current || !connected || !savedBrand) return;
+    const id = params.get("template");
+    if (!id) return;
+    appliedQuery.current = true;
+    if (!brandLooksEmpty({ goals, projects, brand_voice: voice })) return;
+    void applyStarter(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, savedBrand]);
+
   const selfHostActive = isSelfHost();
   const isStudio = tierAtLeast(me?.tier, "studio") || selfHostActive;
 
@@ -575,7 +633,7 @@ export default function Setup() {
           <span className="eyebrow">Brand Studio · v2.9.0</span>
           {t("setup.title")}
         </h1>
-        <span className="sub">{isVoiceSupported() ? t("voice ready") : t("voice: use Chrome / Safari")}</span>
+        <span className="sub">{isVoiceSupported() ? t("voice ready") : t("voice: use Chrome, Edge, or Safari")}</span>
       </div>
       {brandDirty && (
         <div
@@ -884,6 +942,15 @@ export default function Setup() {
           {t("Concrete facts beat vibes — who you talk to, how you sound, words you never use. That's how drafts stay yours.")}
           {!connected && (selfHostActive ? " " + t("Connect your server below first.") : " " + t("Sign in first."))}
         </p>
+        <label>{t("Start as")}</label>
+        <p className="card-desc" style={{ marginTop: 0 }}>
+          {t("Pick a starter that matches how you post. It fills Brand Brain and your apps. You can rewrite every field.")}
+        </p>
+        <StarterTemplatePicker
+          disabled={!connected || savingProfile}
+          selectedId={STARTER_TEMPLATES.find((tpl) => tpl.profile.goals === goals)?.id}
+          onPick={(id) => void applyStarter(id)}
+        />
         <label>{t("setup.goals")}</label>
         <textarea
           rows={3}

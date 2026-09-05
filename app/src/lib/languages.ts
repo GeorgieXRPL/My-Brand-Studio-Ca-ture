@@ -34,3 +34,10 @@ export function speechLocaleFor(code?: string | null): string {
   if (!code) return "en-US";
   return OUTPUT_LANGUAGES.find((l) => l.code === code)?.speech ?? "en-US";
 }
+
+/** Dictation should follow the browser locale, not the draft output language. */
+export function dictationLocale(preferred?: string | null): string {
+  const browser = typeof navigator !== "undefined" ? navigator.language : "";
+  if (browser) return browser;
+  return speechLocaleFor(preferred);
+}

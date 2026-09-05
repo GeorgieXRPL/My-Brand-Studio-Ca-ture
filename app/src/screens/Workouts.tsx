@@ -4,7 +4,7 @@ import { api, isConfigured } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { DumbbellIcon, FlameIcon, MicIcon, SparkIcon, StopIcon, TrashIcon } from "../lib/icons";
 import { startlistening, isVoiceSupported, type VoiceController } from "../lib/voice";
-import { speechLocaleFor } from "../lib/languages";
+import { dictationLocale } from "../lib/languages";
 import type { Workout } from "../lib/types";
 import Spark from "../lib/Spark";
 import { useT } from "../lib/i18n";
@@ -54,7 +54,7 @@ export default function Workouts() {
   const [editing, setEditing] = useState<Workout | null>(null);
   const [editText, setEditText] = useState("");
   const [listening, setListening] = useState(false);
-  const [speechLang, setSpeechLang] = useState("en-US");
+  const [speechLang, setSpeechLang] = useState(() => dictationLocale());
   const voice = useRef<VoiceController | null>(null);
   const baseText = useRef("");
   const configured = isConfigured();
@@ -64,7 +64,7 @@ export default function Workouts() {
       load();
       api
         .getProfile()
-        .then((p) => setSpeechLang(speechLocaleFor(p.traits?.preferred_language)))
+        .then((p) => setSpeechLang(dictationLocale(p.traits?.preferred_language)))
         .catch(() => {});
     } else setLoading(false);
     return () => voice.current?.stop();

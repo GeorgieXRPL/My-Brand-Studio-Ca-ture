@@ -37,9 +37,16 @@ export function createSession(userId) {
 }
 
 export function resolveSession(token) {
-  const row = db.prepare("SELECT user_id FROM sessions WHERE token_hash = ?").get(sha256(token));
+  const hash = sha256(token);
+  const row = db.prepare("SELECT user_id, last_used_at FROM sessions WHERE token_hash = ?").get(hash);
   if (!row) return null;
-  db.prepare("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?").run(now(), sha256(token));
+  const last = Date.parse(row.last_used_at || "") || 0;
+  const idleMs = Number(process.env.SESSION_IDLE_MS) || 90 * 24 * 60 * 60 * 1000;
+  if (last && Date.now() - last > idleMs) {
+    db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hash);
+    return null;
+  }
+  db.prepare("UPDATE sessions SET last_used_at = ? WHERE token_hash = ?").run(now(), hash);
   return row.user_id;
 }
 
@@ -51,11 +58,14 @@ export function destroySession(token) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+const MAX_PASSWORD_LENGTH = 128;
+
 export function signup(email, password, refCode, { termsAccepted } = {}) {
   email = (email || "").trim().toLowerCase();
   password = password || "";
   if (!EMAIL_RE.test(email)) throw httpError(400, "Enter a valid email address.");
   if (password.length < 8) throw httpError(400, "Password must be at least 8 characters.");
+  if (password.length > MAX_PASSWORD_LENGTH) throw httpError(400, "Password is too long.");
   if (!termsAccepted) {
     throw httpError(400, "Please agree to the Terms of Service and Privacy Policy.");
   }
@@ -91,6 +101,8 @@ export function applyReferral(newUserId, refCode) {
 
 export function login(email, password) {
   email = (email || "").trim().toLowerCase();
+  password = password || "";
+  if (password.length > MAX_PASSWORD_LENGTH) throw httpError(401, "Wrong email or password.");
   const user = db
     .prepare("SELECT id, email, password_hash, privy_did, disabled_at FROM users WHERE email = ?")
     .get(email);
@@ -100,7 +112,7 @@ export function login(email, password) {
     }
     throw httpError(400, "This account uses Google sign-in - tap Continue with Google.");
   }
-  if (!user || !verifyPassword(password || "", user.password_hash)) {
+  if (!user || !verifyPassword(password, user.password_hash)) {
     throw httpError(401, "Wrong email or password.");
   }
   if (user.disabled_at) throw httpError(403, "This account has been disabled.");
@@ -139,6 +151,8 @@ export function acceptTerms(userId) {
 export function setUserDisabled(userId, disabled) {
   if (disabled) {
     db.prepare("UPDATE users SET disabled_at = ? WHERE id = ?").run(now(), userId);
+    db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
   } else {
     db.prepare("UPDATE users SET disabled_at = NULL WHERE id = ?").run(userId);
   }
@@ -149,10 +163,14 @@ export function setUserDisabled(userId, disabled) {
 export function findOrCreateGoogleUser(email, { refCode } = {}) {
   email = email.trim().toLowerCase();
   const existing = db
-    .prepare("SELECT id, email, disabled_at FROM users WHERE email = ?")
+    .prepare("SELECT id, email, disabled_at, password_hash FROM users WHERE email = ?")
     .get(email);
   if (existing) {
     if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
+    // Unverified password signup must not inherit a later Google login.
+    if (existing.password_hash) {
+      throw httpError(409, "An account with that email already exists. Sign in with email and password.");
+    }
     return { id: existing.id, email: existing.email, created: false };
   }
   const ts = now();
@@ -184,12 +202,15 @@ export function findOrCreatePrivyUser(did, email, { refCode } = {}) {
   }
 
   const existing = db
-    .prepare("SELECT id, email, privy_did, disabled_at FROM users WHERE email = ?")
+    .prepare("SELECT id, email, privy_did, disabled_at, password_hash FROM users WHERE email = ?")
     .get(email);
   if (existing) {
     if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
     if (existing.privy_did && existing.privy_did !== did) {
       throw httpError(409, "That email is already linked to a different account.");
+    }
+    if (existing.password_hash && !existing.privy_did) {
+      throw httpError(409, "An account with that email already exists. Sign in with email and password.");
     }
     if (!existing.privy_did) {
       db.prepare("UPDATE users SET privy_did = ? WHERE id = ?").run(did, existing.id);

@@ -16,6 +16,7 @@ function isLegacyDefault(list: Platform[]): boolean {
 export function normalizeEnabledPlatforms(list?: string[] | null): Platform[] {
   const picked = (Array.isArray(list) ? list : DEFAULT_ENABLED_PLATFORMS)
     .map((p) => String(p || "").toLowerCase().trim())
+    .map((p) => (p === "youtube_shorts" || p === "youtube-shorts" ? "youtube" : p))
     .filter((p): p is Platform => ALLOWED.has(p));
   const unique = [...new Set(picked)];
   if (!unique.length || isLegacyDefault(unique)) return [...DEFAULT_ENABLED_PLATFORMS];

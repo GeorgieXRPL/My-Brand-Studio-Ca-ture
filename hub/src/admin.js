@@ -1,10 +1,10 @@
 /**
  * Ops admin API + minimal HTML console.
- * Auth: Bearer ADMIN_TOKEN, ?token=, cookie bs_admin, or session email in ADMIN_EMAILS.
+ * Auth: Bearer ADMIN_TOKEN, cookie bs_admin, or session email in ADMIN_EMAILS.
  */
 import { db, mediaDir } from "./db.js";
 import { PLAN_PRICES, VIDEO_CREDIT_PACKS } from "./plans.js";
-import { setUserDisabled } from "./auth.js";
+import { resolveSession, setUserDisabled } from "./auth.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -27,17 +27,21 @@ export function isAdminRequest(req) {
   const expected = adminToken();
   const header = req.headers.authorization || "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  const q = String(req.query?.token || "").trim();
   const cookie = String(req.headers.cookie || "")
     .split(";")
     .map((c) => c.trim())
     .find((c) => c.startsWith("bs_admin="));
   const cookieVal = cookie ? decodeURIComponent(cookie.split("=").slice(1).join("=")) : "";
-  if (expected && (bearer === expected || q === expected || cookieVal === expected)) return true;
+  if (expected && (bearer === expected || cookieVal === expected)) return true;
 
-  if (req.userId && adminEmails().length) {
-    const u = db.prepare("SELECT email FROM users WHERE id = ?").get(req.userId);
-    if (u && adminEmails().includes(String(u.email).toLowerCase())) return true;
+  const emails = adminEmails();
+  if (emails.length) {
+    let userId = req.userId || 0;
+    if (!userId && bearer.startsWith("bs_")) userId = resolveSession(bearer) || 0;
+    if (userId) {
+      const u = db.prepare("SELECT email FROM users WHERE id = ?").get(userId);
+      if (u && emails.includes(String(u.email).toLowerCase())) return true;
+    }
   }
   return false;
 }
@@ -92,17 +96,17 @@ export function createCryptoInvoice({
 }
 
 export function markCryptoPaid(invoiceId, adminNote = "") {
-  const inv = db.prepare("SELECT * FROM crypto_invoices WHERE id = ?").get(invoiceId);
-  if (!inv) return null;
-  if (inv.status === "paid") return inv;
   const ts = now();
-  db.prepare(
-    "UPDATE crypto_invoices SET status = 'paid', admin_note = ?, paid_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'"
-  ).run(adminNote || "marked paid", ts, ts, invoiceId);
-
-  // Re-read — only credit if we won the status race.
+  const info = db
+    .prepare(
+      "UPDATE crypto_invoices SET status = 'paid', admin_note = ?, paid_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'"
+    )
+    .run(adminNote || "marked paid", ts, ts, invoiceId);
+  if (!info.changes) {
+    return db.prepare("SELECT * FROM crypto_invoices WHERE id = ?").get(invoiceId) || null;
+  }
   const paid = db.prepare("SELECT * FROM crypto_invoices WHERE id = ?").get(invoiceId);
-  if (!paid || paid.status !== "paid") return paid;
+  if (!paid) return null;
 
   if (paid.product === "creator" || paid.product === "studio") {
     setUserTier(paid.user_id, paid.product);

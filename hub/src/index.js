@@ -43,6 +43,7 @@ import {
 } from "./billing.js";
 import { DRAFT_LIMITS, STILL_LIMITS, VIDEO_LIMITS, PLAN_PRICES, VIDEO_CREDIT_PACKS } from "./plans.js";
 import {
+  buildThumbnailPrompt,
   buildVideoPrompt,
   downloadBinary,
   editStill,
@@ -58,6 +59,7 @@ import {
 import { withBrandTag } from "./attribution.js";
 import {
   burnTextOntoImage,
+  burnThumbnailTitle,
   burnTextOntoVideo,
   burnWatermarkOntoImage,
   burnWatermarkOntoVideo,
@@ -132,20 +134,30 @@ registerAdminRoutes(app);
 
 const now = () => new Date().toISOString();
 const wrap = (fn) => (req, res) => {
-  try {
-    fn(req, res);
-  } catch (err) {
-    console.error(err);
-    res.status(err.status || 500).json({ error: err.message || "Server error" });
-  }
+  Promise.resolve()
+    .then(() => fn(req, res))
+    .catch((err) => {
+      console.error(err);
+      if (res.headersSent) return;
+      const status = err.status && err.status < 600 ? err.status : 500;
+      res.status(status).json({ error: err.message || "Server error" });
+    });
 };
 
 // ---- Simple in-memory rate limit for auth endpoints ----
 
 const attempts = new Map(); // ip -> { count, resetAt }
+function pruneHitMap(map, nowMs) {
+  if (map.size < 800) return;
+  for (const [key, entry] of map) {
+    if (!entry || entry.resetAt < nowMs) map.delete(key);
+  }
+}
+
 function rateLimit(req, res, next) {
   const ip = req.ip || "unknown";
   const nowMs = Date.now();
+  pruneHitMap(attempts, nowMs);
   const entry = attempts.get(ip);
   if (!entry || entry.resetAt < nowMs) {
     attempts.set(ip, { count: 1, resetAt: nowMs + 15 * 60_000 });
@@ -229,6 +241,9 @@ const hubUrl = () => (process.env.HUB_PUBLIC_URL || "").replace(/\/$/, "");
 
 app.get("/api/auth/google/start", (req, res) => {
   if (!process.env.GOOGLE_CLIENT_ID) return res.status(501).json({ error: "Google sign-in isn't configured." });
+  db.prepare("DELETE FROM oauth_states WHERE platform = 'google' AND created_at < ?").run(
+    new Date(Date.now() - 3600e3).toISOString()
+  );
   const state = randomBytes(24).toString("hex");
   const meta = JSON.stringify({
     ref: String(req.query.ref || "").trim().slice(0, 32),
@@ -252,6 +267,10 @@ app.get("/api/auth/google/callback", async (req, res) => {
     const { state, code } = req.query;
     const pending = db.prepare("SELECT * FROM oauth_states WHERE state = ? AND platform = 'google'").get(state);
     if (!pending) throw new Error("Unknown or expired sign-in attempt.");
+    if (Date.now() - Date.parse(pending.created_at) > 15 * 60_000) {
+      db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
+      throw new Error("Unknown or expired sign-in attempt.");
+    }
     db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
     let refCode = "";
     try {
@@ -339,12 +358,27 @@ app.get("/api/connect/x/callback", async (req, res) => {
   }
 });
 
-// Public media serving (unguessable ids; required later for Meta/TikTok uploads).
+// Public media serving (unguessable 32-char hex ids; required later for Meta/TikTok uploads).
+function isMediaId(id) {
+  return typeof id === "string" && /^[a-f0-9]{32}$/i.test(id);
+}
+
+function parseMediaId(urlOrId) {
+  const id = String(urlOrId || "")
+    .split("?")[0]
+    .split("/")
+    .pop();
+  return isMediaId(id) ? id : "";
+}
+
 app.get("/media/:id", (req, res) => {
-  const row = db.prepare("SELECT * FROM media WHERE id = ?").get(req.params.id);
+  const id = String(req.params.id || "");
+  if (!isMediaId(id)) return res.status(404).end();
+  const row = db.prepare("SELECT * FROM media WHERE id = ?").get(id);
   if (!row) return res.status(404).end();
   const file = join(mediaDir, row.id);
   if (!existsSync(file)) return res.status(404).end();
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.type(row.mime);
   res.sendFile(file);
 });
@@ -364,7 +398,7 @@ if (HUB_TOKEN) ensureOwnerUser();
 const AGENT_ALLOWED = [
   { method: "GET", re: /^\/api\/(profile|ideas|drafts|schedule|workouts|insights|algo)(\/|$|\?)/ },
   { method: "GET", re: /^\/api\/(profile|ideas|drafts|schedule|workouts|insights|algo\/context)$/ },
-  { method: "POST", re: /^\/api\/(ideas|drafts|generate|chat|media|insights)$/ },
+  { method: "POST", re: /^\/api\/(ideas|drafts|generate|insights)$/ },
   { method: "PATCH", re: /^\/api\/(ideas|drafts)\/\d+$/ },
 ];
 
@@ -397,6 +431,7 @@ app.use((req, res, next) => {
       });
     }
     const nowMs = Date.now();
+    pruneHitMap(agentHits, nowMs);
     const hits = agentHits.get(key.id);
     if (!hits || hits.resetAt < nowMs) {
       agentHits.set(key.id, { count: 1, resetAt: nowMs + 60_000 });
@@ -410,6 +445,9 @@ app.use((req, res, next) => {
       assertUserActive(key.user_id);
     } catch (e) {
       return res.status(e.status || 403).json({ error: e.message });
+    }
+    if (key.user_id !== 1 && getTier(key.user_id) !== "studio") {
+      return res.status(403).json({ error: "Agent keys need a Studio plan." });
     }
     db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(now(), key.id);
     db.prepare(
@@ -445,7 +483,9 @@ function getTier(userId) {
 function lockOriginalMedia(draft) {
   if (!draft?.id || draft.original_media_url || !draft.media_url) return;
   // If Imagine already ran and we never stored a source, don't treat the AI result as original.
-  const imagined = db.prepare("SELECT 1 AS n FROM imagine_jobs WHERE draft_id = ? LIMIT 1").get(draft.id);
+  const imagined = db
+    .prepare("SELECT 1 AS n FROM imagine_jobs WHERE draft_id = ? AND kind IN ('still', 'edit', 'video') LIMIT 1")
+    .get(draft.id);
   if (imagined) return;
   db.prepare(
     "UPDATE drafts SET original_media_url = ? WHERE id = ? AND user_id = ? AND (original_media_url IS NULL OR original_media_url = '')"
@@ -488,11 +528,73 @@ function stillUsage(userId) {
   const used = db
     .prepare(
       `SELECT COUNT(*) AS n FROM imagine_jobs
-       WHERE user_id = ? AND kind IN ('still', 'edit') AND status IN ('done', 'pending') AND created_at >= ?`
+       WHERE user_id = ? AND kind IN ('still', 'edit', 'thumbnail') AND status IN ('done', 'pending') AND created_at >= ?`
     )
     .get(userId, monthStartIso()).n;
   const limit = STILL_LIMITS[tier] ?? 0;
   return { tier, used, limit, remaining: Math.max(0, limit - used) };
+}
+
+function stillQuotaError(usage, { thumbnail = false } = {}) {
+  const err = new Error(
+    usage.limit === 0
+      ? thumbnail
+        ? "Thumbnails use AI stills. Upgrade to Creator to unlock."
+        : "AI stills are on Creator+. Upgrade to unlock."
+      : `You've used all ${usage.limit} AI stills this month. Limit resets on the 1st.`
+  );
+  err.status = 429;
+  err.upgrade = usage.limit === 0 ? "creator" : undefined;
+  err.usage = usage;
+  return err;
+}
+
+/** Take a still slot before calling xAI so concurrent requests cannot overshoot the monthly cap. */
+function expireStaleStillJobs() {
+  const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  db.prepare(
+    `UPDATE imagine_jobs SET status = 'failed', error = 'Timed out', progress = 100, updated_at = ?
+     WHERE status = 'pending' AND kind IN ('still', 'edit', 'thumbnail') AND created_at < ?`
+  ).run(now(), cutoff);
+}
+
+function reserveStillJob({ userId, draftId, kind, prompt }) {
+  expireStaleStillJobs();
+  return db.transaction(() => {
+    const usage = stillUsage(userId);
+    if (usage.remaining <= 0) throw stillQuotaError(usage, { thumbnail: kind === "thumbnail" });
+    const ts = now();
+    const info = db
+      .prepare(
+        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, 'pending', 0, ?, ?, ?)`
+      )
+      .run(userId, draftId, kind, String(prompt || "").slice(0, 1800), ts, ts);
+    return db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
+  })();
+}
+
+function completeStillJob(jobId, { mediaUrl, overlayText, watermark, error } = {}) {
+  if (!jobId) return;
+  const ts = now();
+  if (error) {
+    db.prepare(
+      `UPDATE imagine_jobs SET status = 'failed', error = ?, progress = 100, updated_at = ? WHERE id = ? AND status = 'pending'`
+    ).run(String(error || "Generation failed").slice(0, 400), ts, jobId);
+    return;
+  }
+  db.prepare(
+    `UPDATE imagine_jobs SET status = 'done', progress = 100, media_url = ?, overlay_text = ?, watermark = ?, error = NULL, updated_at = ? WHERE id = ?`
+  ).run(mediaUrl, overlayText || null, watermark ? 1 : 0, ts, jobId);
+}
+
+function replyImagineError(res, err, fallback) {
+  if (res.headersSent) return;
+  const status = err.status && err.status < 600 ? err.status : 500;
+  const body = { error: err.message || fallback };
+  if (err.upgrade) body.upgrade = err.upgrade;
+  if (err.usage) Object.assign(body, err.usage);
+  res.status(status).json(body);
 }
 
 /**
@@ -515,6 +617,71 @@ function videoUsage(userId) {
     remaining,
     limit: included,
   };
+}
+
+function videoQuotaError(usage, isStudio) {
+  const err = new Error(
+    isStudio
+      ? `You've used your ${usage.included} included clips this month. Buy more credits on Setup, or wait until the 1st.`
+      : "No video credits left. Buy a pack on Setup."
+  );
+  err.status = 429;
+  err.usage = usage;
+  return err;
+}
+
+/** Reserve included/credit slot before calling xAI so concurrent clips cannot overshoot. */
+function reserveVideoJob({
+  userId,
+  draftId,
+  prompt,
+  overlayText,
+  voiceId,
+  narrationText,
+  wantWatermark,
+}) {
+  return db.transaction(() => {
+    if (imagineQueueFull()) {
+      const err = new Error(
+        "AI clips are busy — wait a minute and try again. A few generate at a time so the server stays fast."
+      );
+      err.status = 429;
+      throw err;
+    }
+    const usage = videoUsage(userId);
+    const isStudio = getTier(userId) === "studio" || userId === 1;
+    if (!isStudio && usage.credits <= 0 && usage.included_remaining <= 0) {
+      const err = new Error("AI video is a Studio feature — upgrade, or buy video credits on Setup.");
+      err.status = 402;
+      err.upgrade = "studio";
+      throw err;
+    }
+    if (usage.remaining <= 0) throw videoQuotaError(usage, isStudio);
+    let creditCharged = 0;
+    if (usage.included_remaining <= 0) {
+      if (!consumeVideoCredit(userId)) throw videoQuotaError(videoUsage(userId), isStudio);
+      creditCharged = 1;
+    }
+    const ts = now();
+    const info = db
+      .prepare(
+        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, overlay_text, voice_id, narration_text, credit_charged, watermark, created_at, updated_at)
+         VALUES (?, ?, 'video', NULL, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        userId,
+        draftId,
+        String(prompt || "").slice(0, 1800),
+        overlayText || null,
+        voiceId || null,
+        narrationText || null,
+        creditCharged,
+        wantWatermark ? 1 : 0,
+        ts,
+        ts
+      );
+    return db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
+  })();
 }
 
 function assertDraftQuota(userId, res) {
@@ -750,7 +917,7 @@ function readProfile(userId) {
 function loadWatermarkBuffer(userId, url) {
   if (!url) return null;
   const id = String(url).split("/").pop()?.split("?")[0];
-  if (!id) return null;
+  if (!isMediaId(id)) return null;
   const row = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(id, userId);
   if (!row?.mime?.startsWith("image/")) return null;
   const file = join(mediaDir, row.id);
@@ -820,7 +987,7 @@ app.post("/api/ideas", wrap((req, res) => {
   if (!text) return res.status(400).json({ error: "text is required" });
   const info = db
     .prepare("INSERT INTO ideas (user_id, text, status, media_url, created_at) VALUES (?, ?, 'open', ?, ?)")
-    .run(req.userId, text, req.body?.media_url || null, now());
+    .run(req.userId, text, assertOwnedMediaUrl(req.userId, req.body?.media_url), now());
   res.status(201).json(db.prepare("SELECT * FROM ideas WHERE id = ?").get(info.lastInsertRowid));
 }));
 
@@ -843,11 +1010,26 @@ app.delete("/api/ideas/:id", wrap((req, res) => {
 
 // ---- Drafts ----
 
-function mediaMimeForUrl(url) {
-  if (!url) return null;
-  const id = String(url).split("/").pop()?.split("?")[0];
+function mediaMimeForUrl(url, userId) {
+  const id = parseMediaId(url);
   if (!id) return null;
-  return db.prepare("SELECT mime FROM media WHERE id = ?").get(id)?.mime || null;
+  const row = userId
+    ? db.prepare("SELECT mime FROM media WHERE id = ? AND user_id = ?").get(id, userId)
+    : db.prepare("SELECT mime FROM media WHERE id = ?").get(id);
+  return row?.mime || null;
+}
+
+function latestThumbnailUrl(draftId, userId) {
+  if (!draftId || !userId) return null;
+  return (
+    db
+      .prepare(
+        `SELECT media_url FROM imagine_jobs
+         WHERE draft_id = ? AND user_id = ? AND kind = 'thumbnail' AND status = 'done' AND media_url IS NOT NULL
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(draftId, userId)?.media_url || null
+  );
 }
 
 function draftJson(row) {
@@ -855,8 +1037,9 @@ function draftJson(row) {
   return {
     ...row,
     variants: safeParseVariants(row.variants),
-    media_mime: mediaMimeForUrl(row.media_url),
-    original_media_mime: mediaMimeForUrl(row.original_media_url),
+    media_mime: mediaMimeForUrl(row.media_url, row.user_id),
+    original_media_mime: mediaMimeForUrl(row.original_media_url, row.user_id),
+    thumbnail_url: latestThumbnailUrl(row.id, row.user_id),
   };
 }
 
@@ -873,6 +1056,7 @@ app.post("/api/drafts", wrap((req, res) => {
   const status = isAgent ? "draft" : req.body?.status || "draft";
   const source = isAgent ? "agent" : req.body?.source || "user";
   if (!topic || !variants) return res.status(400).json({ error: "topic and variants are required" });
+  const ownedMedia = assertOwnedMediaUrl(req.userId, media_url);
   const info = db
     .prepare(
       "INSERT INTO drafts (user_id, idea_id, topic, variants, status, source, media_url, original_media_url, agent_key_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -884,8 +1068,8 @@ app.post("/api/drafts", wrap((req, res) => {
       JSON.stringify(sanitizeVariants(variants)),
       status,
       source,
-      media_url,
-      media_url || null,
+      ownedMedia,
+      ownedMedia || null,
       req.agentKeyId || null,
       now()
     );
@@ -901,11 +1085,13 @@ app.patch("/api/drafts/:id", wrap((req, res) => {
   if (req.tokenKind === "agent" && status && status !== "draft") {
     return res.status(403).json({ error: "Agents can't approve drafts. The user approves in the app." });
   }
-  let nextMedia = media_url !== undefined ? media_url : existing.media_url;
+  let nextMedia = existing.media_url;
   let nextOriginal = existing.original_media_url;
-  if (media_url !== undefined && media_url && !existing.original_media_url) {
-    // First attachment (or recovery): treat it as the restore point.
-    nextOriginal = media_url;
+  if (media_url !== undefined) {
+    nextMedia = assertOwnedMediaUrl(req.userId, media_url);
+    if (nextMedia && !existing.original_media_url) {
+      nextOriginal = nextMedia;
+    }
   }
   db.prepare(
     "UPDATE drafts SET status = ?, variants = ?, topic = ?, media_url = ?, original_media_url = ? WHERE id = ?"
@@ -983,8 +1169,10 @@ app.post("/api/generate", async (req, res) => {
     let image = null;
     let isVideo = false;
     if (mediaUrl) {
-      const mediaId = mediaUrl.split("/").pop();
-      const media = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId);
+      const mediaId = parseMediaId(mediaUrl);
+      const media = mediaId
+        ? db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId)
+        : null;
       const file = media && join(mediaDir, media.id);
       if (media && existsSync(file)) {
         if (media.mime.startsWith("image/") && statSync(file).size < 4.5 * 1024 * 1024) {
@@ -1040,17 +1228,18 @@ app.post("/api/generate", async (req, res) => {
 
 // ---- Freeform chat with Claude (uses profile as context) ----
 
-app.post("/api/chat", async (req, res) => {
-  try {
-    const message = (req.body?.message || "").trim();
-    if (!message) return res.status(400).json({ error: "message is required" });
-    const reply = await chat({ message, profile: readProfile(req.userId) });
-    res.json({ reply: sanitizeCopy(reply) });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message || "Chat failed" });
-  }
-});
+const chatHits = new Map();
+
+app.post("/api/chat", wrap(async (req, res) => {
+  const wait = hitLimit(chatHits, req.userId, 20, 60_000);
+  if (wait) return res.status(429).json({ error: `Chat rate limit — try again in ${wait}s.` });
+  const message = String(req.body?.message || "").trim().slice(0, 4000);
+  if (!message) return res.status(400).json({ error: "message is required" });
+  const blocked = findBlockedContent(message);
+  if (blocked) return res.status(400).json({ error: blocked });
+  const reply = await chat({ message, profile: readProfile(req.userId) });
+  res.json({ reply: sanitizeCopy(reply) });
+}));
 
 // ---- Schedule ----
 
@@ -1348,6 +1537,7 @@ const mediaHits = new Map();
 const imagineHits = new Map();
 function hitLimit(map, key, limit, windowMs) {
   const nowMs = Date.now();
+  pruneHitMap(map, nowMs);
   const entry = map.get(key);
   if (!entry || entry.resetAt < nowMs) {
     map.set(key, { count: 1, resetAt: nowMs + windowMs });
@@ -1457,6 +1647,34 @@ function publicMediaUrl(mediaId) {
   return `${base}/media/${mediaId}`;
 }
 
+/** Only hub-owned images may be sent to xAI — never an arbitrary caller URL. */
+function ownedHubImageUrl(userId, urlOrId) {
+  const id = parseMediaId(urlOrId);
+  if (!id) return null;
+  const media = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(id, userId);
+  if (!media?.mime?.startsWith("image/")) return null;
+  return publicMediaUrl(media.id);
+}
+
+function ownedMediaUrlOrNull(userId, url) {
+  if (url == null || url === "") return null;
+  const id = parseMediaId(url);
+  if (!id) return null;
+  const media = db.prepare("SELECT id FROM media WHERE id = ? AND user_id = ?").get(id, userId);
+  return media ? publicMediaUrl(media.id) : null;
+}
+
+function assertOwnedMediaUrl(userId, url) {
+  if (url == null || url === "") return null;
+  const owned = ownedMediaUrlOrNull(userId, url);
+  if (!owned) {
+    const err = new Error("Media must be a file you uploaded to this hub.");
+    err.status = 400;
+    throw err;
+  }
+  return owned;
+}
+
 function saveDownloadedMedia(userId, buf, mime) {
   const id = randomBytes(16).toString("hex");
   writeFileSync(join(mediaDir, id), buf);
@@ -1474,13 +1692,16 @@ function saveDownloadedMedia(userId, buf, mime) {
 function failImagineJob(job, error, { progress = 100 } = {}) {
   if (!job?.id) return;
   const ts = now();
-  db.prepare(
-    "UPDATE imagine_jobs SET status = 'failed', error = ?, progress = ?, updated_at = ? WHERE id = ? AND status = 'pending'"
-  ).run(String(error || "Generation failed").slice(0, 400), progress, ts, job.id);
-  if (job.credit_charged) {
-    refundVideoCredit(job.user_id);
-    db.prepare("UPDATE imagine_jobs SET credit_charged = 0 WHERE id = ?").run(job.id);
-  }
+  const result = db.transaction(() => {
+    const row = db.prepare("SELECT credit_charged, user_id FROM imagine_jobs WHERE id = ?").get(job.id);
+    const info = db
+      .prepare(
+        "UPDATE imagine_jobs SET status = 'failed', error = ?, progress = ?, credit_charged = 0, updated_at = ? WHERE id = ? AND status = 'pending'"
+      )
+      .run(String(error || "Generation failed").slice(0, 400), progress, ts, job.id);
+    return { changes: info.changes, charged: row?.credit_charged, userId: row?.user_id ?? job.user_id };
+  })();
+  if (result.changes && result.charged) refundVideoCredit(result.userId);
 }
 
 async function syncImagineJob(job) {
@@ -1498,7 +1719,7 @@ async function syncImagineJob(job) {
       if (poll.respectModeration === false) {
         failImagineJob(job, "Generated clip did not pass moderation.");
       } else {
-        let { buf, mime } = await downloadBinary(poll.url);
+        let { buf, mime } = await downloadBinary(poll.url, { maxBytes: 80 * 1024 * 1024 });
         mime = mime.startsWith("video/") ? mime : "video/mp4";
         // Cap in-memory processing — huge buffers OOMed the Fly VM.
         if (buf.length > 40 * 1024 * 1024) {
@@ -1635,7 +1856,7 @@ app.post("/api/imagine/video", async (req, res) => {
     const tier = getTier(req.userId);
     const isStudio = tier === "studio" || req.userId === 1;
     let usage = videoUsage(req.userId);
-    if (!isStudio && usage.credits <= 0) {
+    if (!isStudio && usage.credits <= 0 && usage.included_remaining <= 0) {
       return res.status(402).json({
         error: "AI video is a Studio feature — upgrade, or buy video credits on Setup.",
         upgrade: "studio",
@@ -1700,35 +1921,34 @@ app.post("/api/imagine/video", async (req, res) => {
       });
     const sanitized = sanitizeImaginePrompt(rawPrompt);
     const prompt = sanitized.prompt;
-    const blockedPrompt = findBlockedContent(prompt) || findBlockedContent(draft.topic);
+    const blockedPrompt =
+      findBlockedContent(prompt) ||
+      findBlockedContent(draft.topic) ||
+      findBlockedContent(overlayText) ||
+      findBlockedContent(narrationText || "");
     if (blockedPrompt) return res.status(400).json({ error: blockedPrompt });
     if (!overlayText && sanitized.extractedOnScreen) {
       overlayText = normalizeOnScreen(sanitized.extractedOnScreen);
     }
 
-    let imageUrl = null;
-    if (draft.media_url) {
-      const mediaId = draft.media_url.split("/").pop();
-      const media = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId);
-      if (media?.mime?.startsWith("image/")) {
-        imageUrl = draft.media_url.startsWith("http") ? draft.media_url : publicMediaUrl(media.id);
-      }
+    let imageUrl = ownedHubImageUrl(req.userId, draft.media_url);
+    if (req.body?.image_url) {
+      const fromBody = ownedHubImageUrl(req.userId, req.body.image_url);
+      if (fromBody) imageUrl = fromBody;
     }
-    if (req.body?.image_url) imageUrl = req.body.image_url;
 
     const wantWatermark = req.body?.watermark !== false && Boolean(resolveWatermarkUrl(req.userId));
     const duration = Math.min(8, Math.max(4, Number(req.body?.duration) || 6));
 
-    let burnedCredit = false;
-    if (usage.included_remaining <= 0) {
-      if (!consumeVideoCredit(req.userId)) {
-        return res.status(429).json({
-          error: "No video credits left. Buy a pack on Setup.",
-          ...videoUsage(req.userId),
-        });
-      }
-      burnedCredit = true;
-    }
+    const job = reserveVideoJob({
+      userId: req.userId,
+      draftId,
+      prompt,
+      overlayText: wantOverlay ? overlayText : null,
+      voiceId: voiceId !== "none" ? voiceId : null,
+      narrationText,
+      wantWatermark,
+    });
 
     let requestId;
     try {
@@ -1741,37 +1961,21 @@ app.post("/api/imagine/video", async (req, res) => {
         resolution: req.body?.resolution || "720p",
       }));
     } catch (err) {
-      if (burnedCredit) refundVideoCredit(req.userId);
+      failImagineJob(job, err.message || "Failed to start AI clip");
       throw err;
     }
 
-    const ts = now();
-    const info = db
-      .prepare(
-        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, overlay_text, voice_id, narration_text, credit_charged, watermark, created_at, updated_at)
-         VALUES (?, ?, 'video', ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        req.userId,
-        draftId,
-        requestId,
-        prompt,
-        wantOverlay ? overlayText : null,
-        voiceId !== "none" ? voiceId : null,
-        narrationText,
-        burnedCredit ? 1 : 0,
-        wantWatermark ? 1 : 0,
-        ts,
-        ts
-      );
+    db.prepare("UPDATE imagine_jobs SET xai_request_id = ?, updated_at = ? WHERE id = ?").run(
+      requestId,
+      now(),
+      job.id
+    );
 
-    const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
+    const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
     res.status(201).json({ ...jobJson(row), usage: videoUsage(req.userId) });
   } catch (err) {
     console.error(err);
-    res.status(err.status && err.status < 600 ? err.status : 500).json({
-      error: err.message || "Failed to start AI clip",
-    });
+    replyImagineError(res, err, "Failed to start AI clip");
   }
 });
 
@@ -1790,17 +1994,6 @@ app.post("/api/imagine/still", async (req, res) => {
     if (imagineQueueFull()) {
       return res.status(429).json({
         error: "AI images are busy — wait a minute and try again.",
-      });
-    }
-    const usage = stillUsage(req.userId);
-    if (usage.remaining <= 0) {
-      return res.status(429).json({
-        error:
-          usage.limit === 0
-            ? "AI stills are on Creator+. Upgrade to unlock."
-            : `You've used all ${usage.limit} AI stills this month. Limit resets on the 1st.`,
-        upgrade: usage.limit === 0 ? "creator" : undefined,
-        ...usage,
       });
     }
 
@@ -1829,77 +2022,167 @@ app.post("/api/imagine/still", async (req, res) => {
       overlayText = normalizeOnScreen(sanitized.extractedOnScreen);
     }
     const wantWatermark = req.body?.watermark !== false && Boolean(resolveWatermarkUrl(req.userId));
-    const { url } = await generateStill({ prompt, aspectRatio: "9:16" });
-    let { buf, mime } = await downloadBinary(url);
-    mime = mime.startsWith("image/") ? mime : "image/png";
-    if (wantOverlay && overlayText) {
-      try {
-        buf = await burnTextOntoImage(buf, overlayText);
-        mime = "image/jpeg";
-      } catch (e) {
-        console.warn("overlay still", e.message);
-      }
-    }
-    if (wantWatermark) {
-      try {
-        const wmUrl = resolveWatermarkUrl(req.userId);
-        const wmBuf = loadWatermarkBuffer(req.userId, wmUrl);
-        if (wmBuf) {
-          buf = await burnWatermarkOntoImage(buf, wmBuf);
+    const job = reserveStillJob({ userId: req.userId, draftId, kind: "still", prompt });
+    try {
+      const { url } = await generateStill({ prompt, aspectRatio: "9:16" });
+      let { buf, mime } = await downloadBinary(url, { maxBytes: 12 * 1024 * 1024 });
+      mime = mime.startsWith("image/") ? mime : "image/png";
+      if (wantOverlay && overlayText) {
+        try {
+          buf = await burnTextOntoImage(buf, overlayText);
           mime = "image/jpeg";
+        } catch (e) {
+          console.warn("overlay still", e.message);
         }
-      } catch (e) {
-        console.warn("watermark still", e.message);
       }
+      if (wantWatermark) {
+        try {
+          const wmUrl = resolveWatermarkUrl(req.userId);
+          const wmBuf = loadWatermarkBuffer(req.userId, wmUrl);
+          if (wmBuf) {
+            buf = await burnWatermarkOntoImage(buf, wmBuf);
+            mime = "image/jpeg";
+          }
+        } catch (e) {
+          console.warn("watermark still", e.message);
+        }
+      }
+      const saved = saveDownloadedMedia(req.userId, buf, mime);
+      replaceDraftMedia(draft, saved.url);
+      completeStillJob(job.id, {
+        mediaUrl: saved.url,
+        overlayText: wantOverlay ? overlayText : null,
+        watermark: wantWatermark,
+      });
+      const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
+      res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+    } catch (err) {
+      completeStillJob(job.id, { error: err.message });
+      throw err;
     }
-    const saved = saveDownloadedMedia(req.userId, buf, mime);
-    replaceDraftMedia(draft, saved.url);
-
-    const ts = now();
-    const info = db
-      .prepare(
-        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, overlay_text, watermark, media_url, created_at, updated_at)
-         VALUES (?, ?, 'still', NULL, 'done', 100, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        req.userId,
-        draftId,
-        prompt,
-        wantOverlay ? overlayText : null,
-        wantWatermark ? 1 : 0,
-        saved.url,
-        ts,
-        ts
-      );
-
-    const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
   } catch (err) {
     console.error(err);
-    res.status(err.status && err.status < 600 ? err.status : 500).json({
-      error: err.message || "Failed to generate still",
-    });
+    replyImagineError(res, err, "Failed to generate still");
+  }
+});
+
+/** 16:9 YouTube cover. Counts as a still. Does not replace the draft clip. */
+app.post("/api/imagine/thumbnail", async (req, res) => {
+  try {
+    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
+    }
+    if (!requireTier(req, res, "creator")) return;
+    if (!imagineConfigured()) {
+      return res.status(503).json({
+        error: "AI image generation is not configured. Add XAI_API_KEY on the hub.",
+      });
+    }
+    if (imagineQueueFull()) {
+      return res.status(429).json({
+        error: "AI images are busy — wait a minute and try again.",
+      });
+    }
+
+    const draftId = Number(req.body?.draft_id);
+    if (!draftId) return res.status(400).json({ error: "draft_id is required" });
+    const draft = db.prepare("SELECT * FROM drafts WHERE id = ? AND user_id = ?").get(draftId, req.userId);
+    if (!draft) return res.status(404).json({ error: "Draft not found" });
+
+    const platform = req.body?.platform || "youtube";
+    const variants = safeParseVariants(draft.variants);
+    const script = (variants[platform] || variants.youtube || variants.tiktok || "").trim();
+    const labels = parseFilmLabels(script);
+    const profile = readProfile(req.userId);
+    const rawPrompt =
+      (req.body?.prompt || "").trim() ||
+      buildThumbnailPrompt({
+        topic: draft.topic,
+        hook: labels.hook,
+        onScreen: labels.onScreen,
+        brandVoice: profile.brand_voice,
+        vibe: profile.traits?.vibe,
+        content_style: profile.traits?.content_style,
+        target_audience: profile.traits?.target_audience,
+      });
+    const sanitized = sanitizeImaginePrompt(rawPrompt, { forStill: true });
+    const prompt = sanitized.prompt;
+    const blockedPrompt = findBlockedContent(prompt) || findBlockedContent(draft.topic);
+    if (blockedPrompt) return res.status(400).json({ error: blockedPrompt });
+
+    const wantOverlay = req.body?.overlay !== false;
+    let overlayText = normalizeOnScreen(
+      req.body?.overlay_text || req.body?.title || labels.hook || labels.onScreen || "",
+      { maxWords: 4 }
+    );
+    if (!overlayText && sanitized.extractedOnScreen) {
+      overlayText = normalizeOnScreen(sanitized.extractedOnScreen, { maxWords: 4 });
+    }
+    const wantWatermark = req.body?.watermark !== false && Boolean(resolveWatermarkUrl(req.userId));
+    const job = reserveStillJob({ userId: req.userId, draftId, kind: "thumbnail", prompt });
+    try {
+      const { url } = await generateStill({ prompt, aspectRatio: "16:9" });
+      let { buf, mime } = await downloadBinary(url, { maxBytes: 12 * 1024 * 1024 });
+      mime = mime.startsWith("image/") ? mime : "image/png";
+      if (wantOverlay && overlayText) {
+        try {
+          buf = await burnThumbnailTitle(buf, overlayText);
+          mime = "image/jpeg";
+        } catch (e) {
+          console.warn("overlay thumbnail", e.message);
+        }
+      }
+      if (wantWatermark) {
+        try {
+          const wmUrl = resolveWatermarkUrl(req.userId);
+          const wmBuf = loadWatermarkBuffer(req.userId, wmUrl);
+          if (wmBuf) {
+            buf = await burnWatermarkOntoImage(buf, wmBuf, { scale: 0.1, margin: 0.03 });
+            mime = "image/jpeg";
+          }
+        } catch (e) {
+          console.warn("watermark thumbnail", e.message);
+        }
+      }
+      const saved = saveDownloadedMedia(req.userId, buf, mime);
+      completeStillJob(job.id, {
+        mediaUrl: saved.url,
+        overlayText: wantOverlay ? overlayText : null,
+        watermark: wantWatermark,
+      });
+      const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
+      res.status(201).json({
+        ...jobJson(row),
+        thumbnail_url: saved.url,
+        usage: stillUsage(req.userId),
+      });
+    } catch (err) {
+      completeStillJob(job.id, { error: err.message });
+      throw err;
+    }
+  } catch (err) {
+    console.error(err);
+    replyImagineError(res, err, "Failed to generate thumbnail");
   }
 });
 
 /** Edit an existing draft photo with Grok Imagine (counts toward still allowance). */
 app.post("/api/imagine/edit", async (req, res) => {
   try {
+    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    if (wait) {
+      return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
+    }
     if (!requireTier(req, res, "creator")) return;
     if (!imagineConfigured()) {
       return res.status(503).json({
         error: "AI image editing is not configured. Add XAI_API_KEY on the hub.",
       });
     }
-    const usage = stillUsage(req.userId);
-    if (usage.remaining <= 0) {
+    if (imagineQueueFull()) {
       return res.status(429).json({
-        error:
-          usage.limit === 0
-            ? "Photo edits are on Creator+. Upgrade to unlock."
-            : `You've used all ${usage.limit} AI stills/edits this month. Limit resets on the 1st.`,
-        upgrade: usage.limit === 0 ? "creator" : undefined,
-        ...usage,
+        error: "AI images are busy — wait a minute and try again.",
       });
     }
 
@@ -1911,11 +2194,13 @@ app.post("/api/imagine/edit", async (req, res) => {
       return res.status(400).json({ error: "This draft has no photo to edit. Attach one first." });
     }
 
-    const mediaId = String(draft.media_url).split("/").pop()?.split("?")[0];
-    const media = mediaId
-      ? db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId)
-      : null;
-    if (media && !media.mime?.startsWith("image/")) {
+    const mediaId = parseMediaId(draft.media_url);
+    if (!mediaId) {
+      return res.status(400).json({ error: "This draft photo can't be edited." });
+    }
+    const media = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(mediaId, req.userId);
+    if (!media) return res.status(400).json({ error: "This draft photo can't be edited." });
+    if (!media.mime?.startsWith("image/")) {
       return res.status(400).json({ error: "Only photos can be edited — not video clips." });
     }
 
@@ -1927,45 +2212,38 @@ app.post("/api/imagine/edit", async (req, res) => {
         error: "Pick a quick fix (brighten, clean background…) or describe the change.",
       });
     }
+    const blockedPrompt = findBlockedContent(prompt) || findBlockedContent(draft.topic);
+    if (blockedPrompt) return res.status(400).json({ error: blockedPrompt });
 
-    let imageUrl = draft.media_url.startsWith("http")
-      ? draft.media_url
-      : media
-        ? publicMediaUrl(media.id)
-        : draft.media_url;
-    if (media) {
-      try {
-        const filePath = join(mediaDir, media.id);
-        if (existsSync(filePath)) {
-          const buf = readFileSync(filePath);
-          const b64 = buf.toString("base64");
-          imageUrl = `data:${media.mime || "image/jpeg"};base64,${b64}`;
+    let imageUrl = ownedHubImageUrl(req.userId, draft.media_url) || publicMediaUrl(media.id);
+    try {
+      const filePath = join(mediaDir, media.id);
+      if (existsSync(filePath)) {
+        const size = statSync(filePath).size;
+        if (size > 0 && size <= 8 * 1024 * 1024) {
+          imageUrl = `data:${media.mime || "image/jpeg"};base64,${readFileSync(filePath).toString("base64")}`;
         }
-      } catch {
-        /* fall back to public URL */
       }
+    } catch {
+      /* fall back to public URL */
     }
 
-    const { url } = await editStill({ imageUrl, prompt, aspectRatio: "9:16" });
-    const { buf, mime } = await downloadBinary(url);
-    const saved = saveDownloadedMedia(req.userId, buf, mime.startsWith("image/") ? mime : "image/png");
-    replaceDraftMedia(draft, saved.url);
-
-    const ts = now();
-    const info = db
-      .prepare(
-        `INSERT INTO imagine_jobs (user_id, draft_id, kind, xai_request_id, status, progress, prompt, media_url, created_at, updated_at)
-         VALUES (?, ?, 'edit', NULL, 'done', 100, ?, ?, ?, ?)`
-      )
-      .run(req.userId, draftId, prompt, saved.url, ts, ts);
-
-    const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+    const job = reserveStillJob({ userId: req.userId, draftId, kind: "edit", prompt });
+    try {
+      const { url } = await editStill({ imageUrl, prompt, aspectRatio: "9:16" });
+      const { buf, mime } = await downloadBinary(url, { maxBytes: 12 * 1024 * 1024 });
+      const saved = saveDownloadedMedia(req.userId, buf, mime.startsWith("image/") ? mime : "image/png");
+      replaceDraftMedia(draft, saved.url);
+      completeStillJob(job.id, { mediaUrl: saved.url });
+      const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
+      res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+    } catch (err) {
+      completeStillJob(job.id, { error: err.message });
+      throw err;
+    }
   } catch (err) {
     console.error(err);
-    res.status(err.status && err.status < 600 ? err.status : 500).json({
-      error: err.message || "Failed to edit photo",
-    });
+    replyImagineError(res, err, "Failed to edit photo");
   }
 });
 
@@ -2209,9 +2487,9 @@ async function syncPendingImagineJobs() {
     .prepare(
       `SELECT * FROM imagine_jobs
        WHERE status = 'pending'
-         AND created_at < datetime('now', '-15 minutes')`
+         AND created_at < ?`
     )
-    .all();
+    .all(new Date(Date.now() - 15 * 60 * 1000).toISOString());
   for (const job of stuck) {
     if (job.media_url) {
       db.prepare(

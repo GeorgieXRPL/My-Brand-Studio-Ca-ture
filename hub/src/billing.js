@@ -194,13 +194,31 @@ function setUserTier(userId, tier, subscriptionId = undefined) {
   }
 }
 
-function tierFromSubscription(sub) {
-  buildPriceMap();
-  const priceId = sub?.items?.data?.[0]?.price?.id;
-  if (priceId && TIER_FROM_PRICE.has(priceId)) return TIER_FROM_PRICE.get(priceId);
-  const meta = sub?.metadata?.tier;
-  if (meta === "creator" || meta === "studio") return meta;
-  return null;
+function claimStripeEvent(event) {
+  const info = db
+    .prepare("INSERT OR IGNORE INTO stripe_events (event_id, type, created_at) VALUES (?, ?, ?)")
+    .run(event.id, event.type, new Date().toISOString());
+  return info.changes > 0;
+}
+
+function releaseStripeEvent(eventId) {
+  db.prepare("DELETE FROM stripe_events WHERE event_id = ?").run(eventId);
+}
+
+function grantCheckoutCredits(session, userId) {
+  const paid = session.payment_status === "paid" || session.payment_status === "no_payment_required";
+  if (!paid) return;
+  const credits = Number(session.metadata?.credits || 0);
+  if (credits <= 0) return;
+  const sessionId = String(session.id || "");
+  if (!sessionId) return;
+  const claimed = db
+    .prepare(
+      "INSERT OR IGNORE INTO stripe_credit_sessions (session_id, user_id, credits, created_at) VALUES (?, ?, ?, ?)"
+    )
+    .run(sessionId, userId, credits, new Date().toISOString());
+  if (!claimed.changes) return;
+  addVideoCredits(userId, credits);
 }
 
 export async function handleStripeWebhook(rawBody, signature) {
@@ -212,53 +230,76 @@ export async function handleStripeWebhook(rawBody, signature) {
   }
   const s = stripe();
   const event = s.webhooks.constructEvent(rawBody, signature, secret);
+  if (!claimStripeEvent(event)) return { received: true, duplicate: true };
 
-  switch (event.type) {
-    case "checkout.session.completed": {
-      const session = event.data.object;
-      const userId = Number(session.client_reference_id || session.metadata?.user_id);
-      if (session.customer && userId) {
-        db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(session.customer, userId);
-      }
-      if (session.mode === "payment" && session.metadata?.type === "video_credits" && userId) {
-        const credits = Number(session.metadata.credits || 0);
-        if (credits > 0) addVideoCredits(userId, credits);
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const userId = Number(session.client_reference_id || session.metadata?.user_id);
+        if (session.customer && userId) {
+          db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(session.customer, userId);
+        }
+        if (session.mode === "payment" && session.metadata?.type === "video_credits" && userId) {
+          grantCheckoutCredits(session, userId);
+          break;
+        }
+        const paid = session.payment_status === "paid" || session.payment_status === "no_payment_required";
+        const tier = session.metadata?.tier;
+        if (paid && userId && (tier === "creator" || tier === "studio")) {
+          setUserTier(userId, tier, session.subscription || null);
+        }
         break;
       }
-      const tier = session.metadata?.tier;
-      if (userId && (tier === "creator" || tier === "studio")) {
-        setUserTier(userId, tier, session.subscription || null);
-      }
-      break;
-    }
-    case "customer.subscription.updated":
-    case "customer.subscription.created": {
-      const sub = event.data.object;
-      const userId = Number(sub.metadata?.user_id);
-      const tier = tierFromSubscription(sub);
-      const active = ["active", "trialing"].includes(sub.status);
-      if (userId) {
-        if (sub.customer) {
-          db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(sub.customer, userId);
+      case "checkout.session.async_payment_succeeded": {
+        const session = event.data.object;
+        const userId = Number(session.client_reference_id || session.metadata?.user_id);
+        if (session.mode === "payment" && session.metadata?.type === "video_credits" && userId) {
+          grantCheckoutCredits(session, userId);
         }
-        if (active && tier) setUserTier(userId, tier, sub.id);
-        if (["canceled", "unpaid", "incomplete_expired"].includes(sub.status)) {
-          setUserTier(userId, "free", null);
-        }
+        break;
       }
-      break;
+      case "customer.subscription.updated":
+      case "customer.subscription.created": {
+        const sub = event.data.object;
+        const userId = Number(sub.metadata?.user_id);
+        const tier = tierFromSubscription(sub);
+        const entitled = ["active", "trialing"].includes(sub.status);
+        if (userId) {
+          if (sub.customer) {
+            db.prepare("UPDATE users SET stripe_customer_id = ? WHERE id = ?").run(sub.customer, userId);
+          }
+          if (entitled && tier) setUserTier(userId, tier, sub.id);
+          else if (["canceled", "unpaid", "incomplete_expired", "past_due", "paused"].includes(sub.status)) {
+            setUserTier(userId, "free", sub.status === "canceled" ? null : sub.id);
+          }
+        }
+        break;
+      }
+      case "customer.subscription.deleted": {
+        const sub = event.data.object;
+        const userId = Number(sub.metadata?.user_id);
+        if (userId) setUserTier(userId, "free", null);
+        break;
+      }
+      default:
+        break;
     }
-    case "customer.subscription.deleted": {
-      const sub = event.data.object;
-      const userId = Number(sub.metadata?.user_id);
-      if (userId) setUserTier(userId, "free", null);
-      break;
-    }
-    default:
-      break;
+  } catch (err) {
+    releaseStripeEvent(event.id);
+    throw err;
   }
 
   return { received: true };
+}
+
+function tierFromSubscription(sub) {
+  buildPriceMap();
+  const priceId = sub?.items?.data?.[0]?.price?.id;
+  if (priceId && TIER_FROM_PRICE.has(priceId)) return TIER_FROM_PRICE.get(priceId);
+  const meta = sub?.metadata?.tier;
+  if (meta === "creator" || meta === "studio") return meta;
+  return null;
 }
 
 export function billingStatus() {

@@ -1,17 +1,26 @@
 // Thin wrapper around the Web Speech API (SpeechRecognition).
-// Works in Chrome on Android and Safari on iOS 14.5+ (needs Siri & Dictation
-// enabled in iOS Settings). Gracefully reports when unsupported.
+// Chrome / Edge on desktop, Chrome on Android, Safari on iOS 14.5+.
+//
+// iOS/Safari: SpeechRecognition will not prompt for the mic. Unlock with
+// getUserMedia, then release the tracks before start().
+// Desktop Chrome: start() must run in the same click as the button. Grabbing
+// the mic with getUserMedia first steals the device and drops user activation,
+// so the orb looks live but nothing is transcribed.
+
+import { micErrorMessage, requestMicrophone } from "./mic";
 
 type SpeechRecognitionLike = {
   lang: string;
   continuous: boolean;
   interimResults: boolean;
+  maxAlternatives?: number;
   start: () => void;
   stop: () => void;
   abort: () => void;
   onresult: ((e: any) => void) | null;
   onerror: ((e: any) => void) | null;
   onend: (() => void) | null;
+  onaudiostart?: ((e: any) => void) | null;
 };
 
 function getRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
@@ -33,10 +42,22 @@ function join(a: string, b: string): string {
   return a + " " + b;
 }
 
-// Android Chrome's continuous mode is buggy: it re-delivers already-final
-// results with a reset resultIndex, duplicating the opening words over and
-// over. Instead we run short NON-continuous sessions and auto-restart when
-// each one ends, committing the finished text between sessions ourselves.
+function wait(ms: number) {
+  return new Promise((r) => window.setTimeout(r, ms));
+}
+
+function isAndroid(): boolean {
+  return /Android/i.test(navigator.userAgent);
+}
+
+function needsMicUnlock(): boolean {
+  const ua = navigator.userAgent;
+  const iOS =
+    /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const safari = /Safari/i.test(ua) && !/Chrome|Chromium|Edg|OPR|Firefox|CriOS|FxiOS/i.test(ua);
+  return iOS || safari;
+}
+
 export function startlistening(
   handlers: {
     onTranscript: (finalText: string, interimText: string) => void;
@@ -47,34 +68,36 @@ export function startlistening(
 ): VoiceController {
   const Ctor = getRecognitionCtor();
   if (!Ctor) {
-    handlers.onError?.("Voice input isn't supported in this browser. Use Chrome on Android or Safari on iPhone.");
+    handlers.onError?.(
+      "Voice input isn't supported in this browser. Use Chrome or Edge on a computer, Chrome on Android, or Safari on iPhone."
+    );
     return { stop: () => {} };
   }
 
   let stopped = false;
-  let committed = ""; // text finalized in previous sessions
+  let committed = "";
   let active: SpeechRecognitionLike | null = null;
-  const speechLang = opts?.lang || "en-US";
+  const speechLang = opts?.lang || (typeof navigator !== "undefined" ? navigator.language : "") || "en-US";
+  const continuous = !isAndroid();
 
   const beginSession = () => {
     if (stopped) return;
     const recognition = new Ctor();
     active = recognition;
     recognition.lang = speechLang;
-    recognition.continuous = false;
+    recognition.continuous = continuous;
     recognition.interimResults = true;
+    if (typeof recognition.maxAlternatives === "number") recognition.maxAlternatives = 1;
 
     let sessionFinal = "";
 
     recognition.onresult = (event: any) => {
-      // Rebuild from the full result list every time; never trust resultIndex.
       sessionFinal = "";
       let interim = "";
       for (let i = 0; i < event.results.length; i++) {
         const chunk = (event.results[i][0].transcript || "").trim();
         if (!chunk) continue;
         if (event.results[i].isFinal) {
-          // Skip re-delivered duplicates of text we already have.
           if (!sessionFinal.endsWith(chunk)) sessionFinal = join(sessionFinal, chunk);
         } else {
           interim += chunk + " ";
@@ -85,13 +108,13 @@ export function startlistening(
 
     recognition.onerror = (e: any) => {
       const err = e?.error || "";
-      // Normal, recoverable events while waiting for speech - keep listening.
       if (err === "no-speech" || err === "aborted") return;
-      if (err === "service-not-allowed" || err === "not-allowed") {
-        // iOS: speech recognition rides on Siri's engine and mic permission.
+      if (err === "service-not-allowed" || err === "not-allowed" || err === "audio-capture") {
         handlers.onError?.(
-          "Mic access was blocked. Allow the microphone for this site — on iPhone also turn on Settings → Siri & Search → Dictation."
+          "Mic access was blocked. Allow Microphone for this site in the address bar (padlock or camera/mic icon)."
         );
+      } else if (err === "network") {
+        handlers.onError?.("Voice needs Chrome or Edge (not Chromium) and a network connection.");
       } else {
         handlers.onError?.(err || "Voice error");
       }
@@ -107,19 +130,35 @@ export function startlistening(
         return;
       }
       handlers.onTranscript(committed, "");
-      // Seamlessly roll into the next session until the user taps stop.
-      beginSession();
+      window.setTimeout(() => beginSession(), continuous ? 80 : 120);
     };
 
     try {
       recognition.start();
     } catch {
-      // start() can throw if a previous session hasn't fully released the mic.
       window.setTimeout(() => beginSession(), 150);
     }
   };
 
-  beginSession();
+  if (needsMicUnlock()) {
+    void (async () => {
+      try {
+        const stream = await requestMicrophone();
+        stream.getTracks().forEach((t) => t.stop());
+      } catch (e) {
+        if (stopped) return;
+        handlers.onError?.(micErrorMessage(e));
+        handlers.onEnd?.();
+        return;
+      }
+      if (stopped) return;
+      await wait(80);
+      if (stopped) return;
+      beginSession();
+    })();
+  } else {
+    beginSession();
+  }
 
   return {
     stop: () => {

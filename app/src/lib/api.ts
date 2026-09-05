@@ -182,6 +182,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  startImagineThumbnail: (payload: {
+    draft_id: number;
+    platform?: string;
+    prompt?: string;
+    overlay?: boolean;
+    overlay_text?: string;
+    watermark?: boolean;
+  }) =>
+    request<ImagineJob & { thumbnail_url?: string }>("/api/imagine/thumbnail", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   billingCryptoConfig: () =>
     request<{
       enabled: boolean;

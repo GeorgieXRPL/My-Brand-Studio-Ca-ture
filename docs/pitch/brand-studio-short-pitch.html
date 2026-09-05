@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Brand Studio short pitch</title>
+  <style>
+    @page { size: A4; margin: 0; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 210mm;
+      height: 297mm;
+      background: #06080f;
+      color: #eef2ff;
+      font-family: ui-sans-serif, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    body {
+      padding: 12mm 14mm 11mm;
+      display: flex;
+      flex-direction: column;
+      gap: 6.5mm;
+    }
+    .kicker {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #93a1c8;
+    }
+    h1 {
+      font-size: 30px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      margin-top: 2mm;
+    }
+    .tag {
+      margin-top: 2mm;
+      font-size: 14px;
+      color: #c4d0f5;
+    }
+    .pitch {
+      background: #12182a;
+      border: 1px solid #2a3558;
+      border-radius: 10px;
+      padding: 5.5mm 6mm;
+      font-size: 12.5px;
+      line-height: 1.4;
+      color: #e8edff;
+    }
+    .pitch strong { color: #fff; font-weight: 650; }
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4mm;
+    }
+    .stat {
+      background: #0d1220;
+      border: 1px solid #243049;
+      border-radius: 8px;
+      padding: 3.5mm 4.5mm;
+    }
+    .stat b {
+      display: block;
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 1mm;
+    }
+    .stat span {
+      font-size: 11px;
+      color: #93a1c8;
+    }
+    h2 {
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #8b9cc8;
+      font-weight: 650;
+    }
+    .icp {
+      font-size: 12px;
+      line-height: 1.35;
+      color: #c9d3ee;
+      margin-top: -3mm;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11.5px;
+      line-height: 1.35;
+    }
+    th {
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #8b9cc8;
+      font-weight: 650;
+      padding: 0 3.5mm 2.5mm 0;
+      border-bottom: 1px solid #2a3558;
+    }
+    td {
+      vertical-align: top;
+      padding: 2.6mm 3mm 2.6mm 0;
+      border-bottom: 1px solid #1c2540;
+      color: #d7def4;
+    }
+    td:first-child {
+      font-weight: 700;
+      color: #fff;
+      width: 28mm;
+    }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5mm;
+      flex: 1;
+    }
+    .box {
+      background: #0d1220;
+      border: 1px solid #243049;
+      border-radius: 8px;
+      padding: 4mm 5mm;
+    }
+    .box h3 {
+      font-size: 13px;
+      margin-bottom: 2.5mm;
+    }
+    .box p {
+      font-size: 12px;
+      line-height: 1.4;
+      color: #c9d3ee;
+    }
+    .box p + p { margin-top: 2.5mm; }
+    .versions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 4mm;
+    }
+    .v h3 {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9aa8d4;
+      margin-bottom: 2mm;
+    }
+    .v p {
+      font-size: 11px;
+      line-height: 1.38;
+      color: #d7def4;
+    }
+    footer {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #7d8bb0;
+      border-top: 1px solid #243049;
+      padding-top: 3.5mm;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="kicker">
+      <span>Brand Studio</span>
+      <span>app.mybrandstudio.club</span>
+    </div>
+    <h1>Speak on your phone.<br>Post everywhere.</h1>
+    <p class="tag">The publishing layer in front of the networks you already use.</p>
+  </header>
+
+  <section class="pitch">
+    You already know what to say. You freeze when five apps want five captions.
+    Brand Studio sits in front of Instagram, TikTok, X, Facebook, and LinkedIn.
+    <strong>Talk once. Get posts in your voice. Share today. Schedule when you want.</strong>
+    We do not own a social network. We feed the ones you already have.
+  </section>
+
+  <div class="stats">
+    <div class="stat"><b>Voice</b><span>How it starts</span></div>
+    <div class="stat"><b>Your brand</b><span>How it stays you</span></div>
+    <div class="stat"><b>Share / Post</b><span>How it ships</span></div>
+  </div>
+
+  <h2>Who it is for</h2>
+  <p class="icp">One type of person: talks better than they type, posts on more than one platform, has no marketing hire. Three buying faces of that same person.</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Buyer</th>
+        <th>They are</th>
+        <th>What breaks</th>
+        <th>The line</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>SMB owner</td>
+        <td>Salon, gym, trades, café, coach. The brand is them.</td>
+        <td>Talks to customers all day. Never posts. No time at a desk.</td>
+        <td>Speak what you would say over the counter.</td>
+      </tr>
+      <tr>
+        <td>Network marketer</td>
+        <td>Distributor or upline. Strong on calls.</td>
+        <td>Daily content grind. Copy-paste scripts. Sounds like everyone else.</td>
+        <td>Speak a real story once. Ship authentic posts all week.</td>
+      </tr>
+      <tr>
+        <td>Solo creator</td>
+        <td>Fitness, builders-in-public, niche educators.</td>
+        <td>Hook is clear out loud. Caption dies in a blank box.</td>
+        <td>Talk the idea. Get a native post for each app.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="split">
+    <div class="box">
+      <h3>Start here</h3>
+      <p>SMBs and network-marketing uplines pay because posting is the job, not a hobby. Uplines also distribute: one demo, a team of invites.</p>
+      <p>Creators are the story you tell in ads. They convert later.</p>
+    </div>
+    <div class="box">
+      <h3>Not for</h3>
+      <p>Social teams that already live in Buffer and only need a calendar. Agencies that want dashboards. People who post to one app from a laptop and like writing.</p>
+      <p>Buffer schedules what you already wrote. ChatGPT ends at copy. CapCut finishes the video. We finish the caption stack and the ship button.</p>
+    </div>
+  </div>
+
+  <h2>15-second versions</h2>
+  <div class="versions">
+    <div class="v">
+      <h3>Anyone</h3>
+      <p>Brand Studio is Uber for social posts: biggest publishing surface, no social network. You speak an idea on your phone and get posts for every platform in your voice.</p>
+    </div>
+    <div class="v">
+      <h3>Owner-operator</h3>
+      <p>You are the brand. You do not have a marketer. Speak what you would tell a customer. Get Instagram, Facebook, TikTok, LinkedIn posts in your voice.</p>
+    </div>
+    <div class="v">
+      <h3>Network marketer</h3>
+      <p>You can pitch on a call. Daily content is the grind. Speak a product or recruiting story once. Get posts for every platform without sounding copy-paste.</p>
+    </div>
+  </div>
+
+  <footer>
+    <span>Free · Creator $19/mo · Studio $49/mo</span>
+    <span>hello@mybrandstudio.club</span>
+  </footer>
+</body>
+</html>

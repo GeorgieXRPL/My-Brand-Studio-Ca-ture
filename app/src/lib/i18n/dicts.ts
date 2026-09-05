@@ -647,7 +647,18 @@ const PHRASES = [
   "Copied {label}",
   "Couldn't copy",
   "address",
-  "token"
+  "token",
+  "Make thumbnail",
+  "Generating thumbnail…",
+  "Thumbnail ready — save it for YouTube",
+  "Thumbnail failed",
+  "Thumbnail title",
+  "2-4 words",
+  "16:9 YouTube cover. Uses one still. Does not replace your clip.",
+  "Save thumbnail",
+  "Thumbnail saved",
+  "Couldn't download thumbnail",
+  "Thumbnail",
 ] as const;
 
 // New keys use English until dedicated locale translations are supplied.
