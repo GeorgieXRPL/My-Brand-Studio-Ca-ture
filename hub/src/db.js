@@ -365,7 +365,32 @@ db.exec(`
     credits INTEGER NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS hub_kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS rate_buckets (
+    bucket TEXT PRIMARY KEY,
+    count INTEGER NOT NULL,
+    reset_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS auth_tokens (
+    token_hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    email TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
+db.exec("CREATE INDEX IF NOT EXISTS idx_auth_tokens_kind_user ON auth_tokens (kind, user_id)");
+db.exec("CREATE INDEX IF NOT EXISTS idx_rate_buckets_reset ON rate_buckets (reset_at)");
+
+if (!hasColumn("users", "email_verified_at")) {
+  db.exec("ALTER TABLE users ADD COLUMN email_verified_at TEXT");
+  // Existing accounts already proved control of the inbox (or are Google/Privy).
+  db.exec("UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL");
+}
 
 // v1 had a singleton "profile" table; move its row to the per-user "profiles".
 const hasOldProfile = db

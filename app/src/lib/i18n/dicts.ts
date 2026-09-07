@@ -659,6 +659,20 @@ const PHRASES = [
   "Thumbnail saved",
   "Couldn't download thumbnail",
   "Thumbnail",
+  "Forgot password?",
+  "Send reset link",
+  "Check your email for a reset link.",
+  "Set a new password",
+  "Password updated. You're signed in.",
+  "Back to sign in",
+  "Confirm your email",
+  "We sent a confirmation link to your inbox.",
+  "Email confirmed",
+  "Resend confirmation",
+  "Confirmation sent",
+  "Google sign-in failed",
+  "This confirmation link is invalid or expired.",
+  "Could not send email",
 ] as const;
 
 // New keys use English until dedicated locale translations are supplied.

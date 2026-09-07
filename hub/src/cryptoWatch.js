@@ -8,7 +8,7 @@ import { markCryptoPaid, listCryptoMethods, CRYPTO_METHOD_DEFS } from "./admin.j
 
 const SOL_CONFIRMS = Math.max(1, Number(process.env.CRYPTO_SOL_CONFIRMATIONS || 32));
 const ETH_CONFIRMS = Math.max(1, Number(process.env.CRYPTO_ETH_CONFIRMATIONS || 12));
-const NATIVE_TOLERANCE = 0.08; // ±8% for SOL/ETH vs live USD
+const NATIVE_TOLERANCE = Math.min(0.05, Math.max(0.01, Number(process.env.CRYPTO_NATIVE_TOLERANCE || 0.025)));
 const LOOKBACK_HOURS = Math.max(1, Number(process.env.CRYPTO_WATCH_LOOKBACK_HOURS || 72));
 
 function solRpc() {
@@ -97,10 +97,7 @@ function amountMatches(inv, receivedRaw, usdPrice) {
       return false;
     }
     if (expected <= 0n) return false;
-    const diff = received > expected ? received - expected : expected - received;
-    const pct = expected / 50n; // 2%
-    const floor = 10_000n; // $0.01
-    return diff <= (pct > floor ? pct : floor);
+    return received === expected;
   }
 
   if (!usdPrice || usdPrice <= 0) return false;
@@ -132,11 +129,15 @@ function txUsedByOther(txHash, invoiceId) {
   return Boolean(row && row.id !== invoiceId);
 }
 
-function findMatch(invoices, receivedRaw, usdPrice, txHash) {
-  for (const inv of invoices) {
-    if (txUsedByOther(txHash, inv.id)) continue;
-    if (inv.tx_hash && inv.tx_hash !== txHash) continue;
-    if (amountMatches(inv, receivedRaw, usdPrice)) return inv;
+export function findMatch(invoices, receivedRaw, usdPrice, txHash) {
+  const matches = invoices.filter((inv) => {
+    if (txUsedByOther(txHash, inv.id)) return false;
+    if (inv.tx_hash && inv.tx_hash !== txHash) return false;
+    return amountMatches(inv, receivedRaw, usdPrice);
+  });
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    console.warn("[crypto] ambiguous deposit, leaving for admin", txHash, matches.map((m) => m.id).join(","));
   }
   return null;
 }

@@ -129,6 +129,31 @@ export const api = {
         ref: ref || undefined,
       }),
     }),
+  forgotPassword: (email: string) =>
+    request<{ ok: true }>("/api/auth/forgot", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token: string, password: string) =>
+    request<{ token: string; email: string }>("/api/auth/reset", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
+  verifyEmail: (token: string) =>
+    request<{ ok: true; email: string }>("/api/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  resendVerify: () =>
+    request<{ ok: true; email_verified: boolean }>("/api/auth/resend-verify", {
+      method: "POST",
+      body: "{}",
+    }),
+  googleExchange: (code: string) =>
+    request<{ token: string; email: string }>("/api/auth/google/exchange", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
 
   getProfile: () => request<Profile>("/api/profile"),
   saveProfile: (p: Profile) => request<Profile>("/api/profile", { method: "PUT", body: JSON.stringify(p) }),
@@ -223,6 +248,8 @@ export const api = {
       token: string | null;
       note: string;
       amount_usd: number;
+      send_amount: string | null;
+      auto_confirm?: boolean;
     }>("/api/billing/crypto/invoice", {
       method: "POST",
       body: JSON.stringify({ product, method }),

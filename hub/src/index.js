@@ -1,12 +1,14 @@
 import express from "express";
 import cors from "cors";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { writeFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { db, ensureOwnerUser, ensureRefCode, mediaDir } from "./db.js";
 import {
   acceptTerms,
   assertUserActive,
+  consumeAuthToken,
+  createAuthToken,
   createSession,
   destroySession,
   findOrCreateGoogleUser,
@@ -14,9 +16,13 @@ import {
   getUser,
   login,
   noteAuthEvent,
+  requestPasswordReset,
+  resetPassword,
   resolveSession,
-  setUserDisabled,
+  sendResetEmail,
+  sendVerifyEmail,
   signup,
+  verifyEmailToken,
 } from "./auth.js";
 import { findBlockedContent } from "./contentFilter.js";
 import { generateVariants, chat, PLATFORMS, resolveTextProvider, anthropicConfigured, grokTextConfigured } from "./textGen.js";
@@ -71,9 +77,13 @@ import { safeParseVariants, sanitizeCopy, sanitizeVariants } from "./sanitize.js
 import {
   createCryptoInvoice,
   cryptoPayConfig,
+  isAdminRequest,
   resolveCryptoMethod,
   registerAdminRoutes,
+  uniqueStableExpectedRaw,
 } from "./admin.js";
+import { takeRateLimit } from "./rateLimit.js";
+import { appendMediaSig, verifyMediaSig } from "./mediaSign.js";
 import { syncCryptoDeposits } from "./cryptoWatch.js";
 import { getVoiceMeta, listTtsVoices, narrationFromLabels, synthesizeSpeech, ttsConfigured } from "./tts.js";
 import {
@@ -144,29 +154,20 @@ const wrap = (fn) => (req, res) => {
     });
 };
 
-// ---- Simple in-memory rate limit for auth endpoints ----
+// ---- Shared SQLite rate limit for auth endpoints ----
 
-const attempts = new Map(); // ip -> { count, resetAt }
-function pruneHitMap(map, nowMs) {
-  if (map.size < 800) return;
-  for (const [key, entry] of map) {
-    if (!entry || entry.resetAt < nowMs) map.delete(key);
-  }
+function secretsEqual(a, b) {
+  if (!a || !b) return false;
+  const ha = createHash("sha256").update(String(a)).digest();
+  const hb = createHash("sha256").update(String(b)).digest();
+  return timingSafeEqual(ha, hb);
 }
 
 function rateLimit(req, res, next) {
-  const ip = req.ip || "unknown";
-  const nowMs = Date.now();
-  pruneHitMap(attempts, nowMs);
-  const entry = attempts.get(ip);
-  if (!entry || entry.resetAt < nowMs) {
-    attempts.set(ip, { count: 1, resetAt: nowMs + 15 * 60_000 });
-    return next();
-  }
-  if (entry.count >= 20) {
+  const wait = takeRateLimit(`auth:${req.ip || "unknown"}`, 20, 15 * 60_000);
+  if (wait) {
     return res.status(429).json({ error: "Too many attempts. Try again in a few minutes." });
   }
-  entry.count++;
   next();
 }
 
@@ -192,14 +193,51 @@ app.post("/api/auth/signup", rateLimit, wrap((req, res) => {
   });
   const token = createSession(user.id);
   noteAuthEvent({ userId: user.id, email: user.email, method: "password", isNew: true });
-  res.status(201).json({ token, email: user.email });
+  sendVerifyEmail(user.id, user.email, appUrl());
+  res.status(201).json({ token, email: user.email, email_verified: false });
 }));
 
 app.post("/api/auth/login", rateLimit, wrap((req, res) => {
   const user = login(req.body?.email, req.body?.password);
   const token = createSession(user.id);
   noteAuthEvent({ userId: user.id, email: user.email, method: "password", isNew: false });
-  res.json({ token, email: user.email });
+  const verified = Boolean(getUser(user.id)?.email_verified_at);
+  res.json({ token, email: user.email, email_verified: verified });
+}));
+
+app.post("/api/auth/forgot", rateLimit, wrap((req, res) => {
+  const reset = requestPasswordReset(req.body?.email);
+  if (reset) sendResetEmail(reset, appUrl());
+  res.json({ ok: true });
+}));
+
+app.post("/api/auth/reset", rateLimit, wrap((req, res) => {
+  const user = resetPassword(req.body?.token, req.body?.password);
+  const token = createSession(user.id);
+  noteAuthEvent({ userId: user.id, email: user.email, method: "password", isNew: false });
+  res.json({ token, email: user.email, email_verified: true });
+}));
+
+app.post("/api/auth/verify-email", rateLimit, wrap((req, res) => {
+  const user = verifyEmailToken(req.body?.token || req.query?.token);
+  res.json({ ok: true, email: user.email });
+}));
+
+app.post("/api/auth/google/exchange", rateLimit, wrap((req, res) => {
+  const row = consumeAuthToken("google_code", req.body?.code);
+  if (!row?.user_id) {
+    return res.status(400).json({ error: "Google sign-in expired. Try again." });
+  }
+  const user = getUser(row.user_id);
+  if (!user) return res.status(400).json({ error: "Google sign-in expired. Try again." });
+  const token = createSession(user.id);
+  noteAuthEvent({
+    userId: user.id,
+    email: user.email,
+    method: "google",
+    isNew: Boolean(row.email === "new"),
+  });
+  res.json({ token, email: user.email, email_verified: true });
 }));
 
 // Which sign-in methods this server supports (drives the app's UI).
@@ -241,6 +279,8 @@ const hubUrl = () => (process.env.HUB_PUBLIC_URL || "").replace(/\/$/, "");
 
 app.get("/api/auth/google/start", (req, res) => {
   if (!process.env.GOOGLE_CLIENT_ID) return res.status(501).json({ error: "Google sign-in isn't configured." });
+  const wait = takeRateLimit(`google:${req.ip || "unknown"}`, 20, 15 * 60_000);
+  if (wait) return res.status(429).json({ error: "Too many attempts. Try again in a few minutes." });
   db.prepare("DELETE FROM oauth_states WHERE platform = 'google' AND created_at < ?").run(
     new Date(Date.now() - 3600e3).toISOString()
   );
@@ -264,9 +304,10 @@ app.get("/api/auth/google/start", (req, res) => {
 
 app.get("/api/auth/google/callback", async (req, res) => {
   try {
-    const { state, code } = req.query;
+    const state = String(req.query.state || "");
+    const googleAuthCode = String(req.query.code || "");
     const pending = db.prepare("SELECT * FROM oauth_states WHERE state = ? AND platform = 'google'").get(state);
-    if (!pending) throw new Error("Unknown or expired sign-in attempt.");
+    if (!pending || !googleAuthCode) throw new Error("Unknown or expired sign-in attempt.");
     if (Date.now() - Date.parse(pending.created_at) > 15 * 60_000) {
       db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
       throw new Error("Unknown or expired sign-in attempt.");
@@ -283,7 +324,7 @@ app.get("/api/auth/google/callback", async (req, res) => {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        code,
+        code: googleAuthCode,
         client_id: process.env.GOOGLE_CLIENT_ID,
         client_secret: process.env.GOOGLE_CLIENT_SECRET,
         redirect_uri: `${hubUrl()}/api/auth/google/callback`,
@@ -305,17 +346,15 @@ app.get("/api/auth/google/callback", async (req, res) => {
     }
 
     const user = findOrCreateGoogleUser(claims.email, { refCode });
-    const session = createSession(user.id);
-    noteAuthEvent({
-      userId: user.id,
-      email: user.email,
-      method: "google",
-      isNew: Boolean(user.created),
-    });
-    res.redirect(`${appUrl()}/setup#gtoken=${session}&gemail=${encodeURIComponent(user.email)}`);
+    const handshake = createAuthToken(
+      "google_code",
+      { userId: user.id, email: user.created ? "new" : user.email },
+      5 * 60_000
+    );
+    res.redirect(`${appUrl()}/setup?gcode=${encodeURIComponent(handshake)}`);
   } catch (err) {
     console.error(err);
-    res.redirect(`${appUrl()}/setup#gerror=${encodeURIComponent(err.message || "Google sign-in failed")}`);
+    res.redirect(`${appUrl()}/setup?gerror=${encodeURIComponent(err.message || "Google sign-in failed")}`);
   }
 });
 
@@ -358,7 +397,7 @@ app.get("/api/connect/x/callback", async (req, res) => {
   }
 });
 
-// Public media serving (unguessable 32-char hex ids; required later for Meta/TikTok uploads).
+// Media serving: signed query, session/agent ownership, hub token, or admin.
 function isMediaId(id) {
   return typeof id === "string" && /^[a-f0-9]{32}$/i.test(id);
 }
@@ -374,14 +413,43 @@ function parseMediaId(urlOrId) {
 app.get("/media/:id", (req, res) => {
   const id = String(req.params.id || "");
   if (!isMediaId(id)) return res.status(404).end();
+  if (!mediaRequestAllowed(req, id)) return res.status(401).end();
   const row = db.prepare("SELECT * FROM media WHERE id = ?").get(id);
   if (!row) return res.status(404).end();
   const file = join(mediaDir, row.id);
   if (!existsSync(file)) return res.status(404).end();
   res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=300");
   res.type(row.mime);
   res.sendFile(file);
 });
+
+function mediaOwnedBy(id, userId) {
+  if (!userId) return false;
+  return Boolean(db.prepare("SELECT id FROM media WHERE id = ? AND user_id = ?").get(id, userId));
+}
+
+function mediaRequestAllowed(req, id) {
+  if (verifyMediaSig(id, req.query?.e, req.query?.s)) return true;
+  const header = req.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (HUB_TOKEN && secretsEqual(token, HUB_TOKEN)) return true;
+  if (token.startsWith("bs_")) {
+    const userId = resolveSession(token);
+    if (mediaOwnedBy(id, userId)) return true;
+  }
+  if (token.startsWith("ak_")) {
+    const keyHash = createHash("sha256").update(token).digest("hex");
+    const key = db.prepare("SELECT user_id FROM api_keys WHERE key_hash = ?").get(keyHash);
+    if (mediaOwnedBy(id, key?.user_id)) return true;
+  }
+  try {
+    if (isAdminRequest(req)) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
 
 // ---- Auth middleware ----
 // Three token kinds share the Authorization header:
@@ -407,7 +475,6 @@ function agentMayAccess(req) {
 }
 
 // Per-key rate limit so a runaway agent can't hammer the hub.
-const agentHits = new Map(); // keyId -> { count, resetAt }
 const AGENT_RATE_LIMIT = Number(process.env.AGENT_RATE_LIMIT || 60); // req/min
 
 app.use((req, res, next) => {
@@ -415,7 +482,7 @@ app.use((req, res, next) => {
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!token) return res.status(401).json({ error: "Unauthorized" });
 
-  if (HUB_TOKEN && token === HUB_TOKEN) {
+  if (HUB_TOKEN && secretsEqual(token, HUB_TOKEN)) {
     req.userId = 1;
     req.tokenKind = "hub";
     return next();
@@ -430,15 +497,9 @@ app.use((req, res, next) => {
         error: "Agent keys can read content and submit drafts/insights only. This action needs the app.",
       });
     }
-    const nowMs = Date.now();
-    pruneHitMap(agentHits, nowMs);
-    const hits = agentHits.get(key.id);
-    if (!hits || hits.resetAt < nowMs) {
-      agentHits.set(key.id, { count: 1, resetAt: nowMs + 60_000 });
-    } else if (hits.count >= AGENT_RATE_LIMIT) {
+    const wait = takeRateLimit(`agent:${key.id}`, AGENT_RATE_LIMIT, 60_000);
+    if (wait) {
       return res.status(429).json({ error: "Agent rate limit reached. Slow down and retry in a minute." });
-    } else {
-      hits.count++;
     }
 
     try {
@@ -748,7 +809,18 @@ app.get("/api/auth/me", wrap((req, res) => {
     credits_checkout: billing.credits_checkout,
     has_stripe_customer: Boolean(user?.stripe_customer_id),
     terms_accepted_at: user?.terms_accepted_at || null,
+    email_verified: Boolean(user?.email_verified_at),
   });
+}));
+
+app.post("/api/auth/resend-verify", wrap((req, res) => {
+  const wait = takeRateLimit(`verify:${req.userId}`, 5, 15 * 60_000);
+  if (wait) return res.status(429).json({ error: `Try again in ${wait}s.` });
+  const user = getUser(req.userId);
+  if (!user?.email) return res.status(400).json({ error: "No email on this account." });
+  if (user.email_verified_at) return res.json({ ok: true, email_verified: true });
+  sendVerifyEmail(user.id, user.email, appUrl());
+  res.json({ ok: true, email_verified: false });
 }));
 
 app.post("/api/auth/accept-terms", wrap((req, res) => {
@@ -843,11 +915,15 @@ app.post("/api/billing/crypto/invoice", wrap((req, res) => {
     memo,
     expectedRaw:
       method.asset === "USDC" || method.asset === "USDT"
-        ? String(Math.round(amountUsd * 1e6))
+        ? uniqueStableExpectedRaw(method.chain, method.asset, amountUsd)
         : null,
   });
+  const sendAmount =
+    (method.asset === "USDC" || method.asset === "USDT") && inv.expected_raw
+      ? (Number(inv.expected_raw) / 1e6).toFixed(2)
+      : null;
   res.status(201).json({
-    invoice: { id: inv.id, product: inv.product, amount_usd: amountUsd },
+    invoice: { id: inv.id, product: inv.product, amount_usd: amountUsd, expected_raw: inv.expected_raw || null },
     method: method.id,
     pay_to: method.pay_to,
     chain: method.chain,
@@ -856,6 +932,7 @@ app.post("/api/billing/crypto/invoice", wrap((req, res) => {
     token: method.token || null,
     note: cfg.note,
     amount_usd: amountUsd,
+    send_amount: sendAmount,
     auto_confirm: cfg.auto_confirm,
   });
 }));
@@ -979,7 +1056,7 @@ app.put("/api/profile", wrap((req, res) => {
 // ---- Ideas ----
 
 app.get("/api/ideas", wrap((req, res) => {
-  res.json(db.prepare("SELECT * FROM ideas WHERE user_id = ? ORDER BY created_at DESC").all(req.userId));
+  res.json(db.prepare("SELECT * FROM ideas WHERE user_id = ? ORDER BY created_at DESC").all(req.userId).map(ideaJson));
 }));
 
 app.post("/api/ideas", wrap((req, res) => {
@@ -988,7 +1065,7 @@ app.post("/api/ideas", wrap((req, res) => {
   const info = db
     .prepare("INSERT INTO ideas (user_id, text, status, media_url, created_at) VALUES (?, ?, 'open', ?, ?)")
     .run(req.userId, text, assertOwnedMediaUrl(req.userId, req.body?.media_url), now());
-  res.status(201).json(db.prepare("SELECT * FROM ideas WHERE id = ?").get(info.lastInsertRowid));
+  res.status(201).json(ideaJson(db.prepare("SELECT * FROM ideas WHERE id = ?").get(info.lastInsertRowid)));
 }));
 
 app.patch("/api/ideas/:id", wrap((req, res) => {
@@ -1000,7 +1077,7 @@ app.patch("/api/ideas/:id", wrap((req, res) => {
     text ?? existing.text,
     existing.id
   );
-  res.json(db.prepare("SELECT * FROM ideas WHERE id = ?").get(existing.id));
+  res.json(ideaJson(db.prepare("SELECT * FROM ideas WHERE id = ?").get(existing.id)));
 }));
 
 app.delete("/api/ideas/:id", wrap((req, res) => {
@@ -1037,10 +1114,17 @@ function draftJson(row) {
   return {
     ...row,
     variants: safeParseVariants(row.variants),
+    media_url: signedMediaUrl(row.media_url),
+    original_media_url: signedMediaUrl(row.original_media_url),
     media_mime: mediaMimeForUrl(row.media_url, row.user_id),
     original_media_mime: mediaMimeForUrl(row.original_media_url, row.user_id),
-    thumbnail_url: latestThumbnailUrl(row.id, row.user_id),
+    thumbnail_url: signedMediaUrl(latestThumbnailUrl(row.id, row.user_id)),
   };
+}
+
+function ideaJson(row) {
+  if (!row) return row;
+  return { ...row, media_url: signedMediaUrl(row.media_url) };
 }
 
 app.get("/api/drafts", wrap((req, res) => {
@@ -1133,13 +1217,12 @@ app.delete("/api/drafts/:id", wrap((req, res) => {
 
 // ---- Generate: one idea -> platform variants, saved as a draft ----
 
-const generateHits = new Map();
 let generateInflight = 0;
 const MAX_GENERATE_INFLIGHT = Math.max(4, Number(process.env.GENERATE_MAX_INFLIGHT || 16));
 
 app.post("/api/generate", async (req, res) => {
   try {
-    const wait = hitLimit(generateHits, req.userId, 12, 60_000);
+    const wait = takeRateLimit(`generate:${req.userId}`, 12, 60_000);
     if (wait) {
       return res.status(429).json({ error: `Draft rate limit — try again in ${wait}s.` });
     }
@@ -1228,10 +1311,8 @@ app.post("/api/generate", async (req, res) => {
 
 // ---- Freeform chat with Claude (uses profile as context) ----
 
-const chatHits = new Map();
-
 app.post("/api/chat", wrap(async (req, res) => {
-  const wait = hitLimit(chatHits, req.userId, 20, 60_000);
+  const wait = takeRateLimit(`chat:${req.userId}`, 20, 60_000);
   if (wait) return res.status(429).json({ error: `Chat rate limit — try again in ${wait}s.` });
   const message = String(req.body?.message || "").trim().slice(0, 4000);
   if (!message) return res.status(400).json({ error: "message is required" });
@@ -1467,7 +1548,7 @@ app.get("/api/posts/scheduled", wrap((req, res) => {
         ...rest,
         draft_topic: row.draft_topic || `Draft #${row.draft_id}`,
         draft_preview: preview.slice(0, 160),
-        draft_media_url: row.draft_media_url || null,
+        draft_media_url: signedMediaUrl(row.draft_media_url),
         draft_status: row.draft_status || null,
       };
     })
@@ -1533,23 +1614,6 @@ const MEDIA_TYPES = {
 };
 
 /** Per-user rate limits for upload / Imagine (abuse protection). */
-const mediaHits = new Map();
-const imagineHits = new Map();
-function hitLimit(map, key, limit, windowMs) {
-  const nowMs = Date.now();
-  pruneHitMap(map, nowMs);
-  const entry = map.get(key);
-  if (!entry || entry.resetAt < nowMs) {
-    map.set(key, { count: 1, resetAt: nowMs + windowMs });
-    return null;
-  }
-  if (entry.count >= limit) {
-    return Math.ceil((entry.resetAt - nowMs) / 1000);
-  }
-  entry.count++;
-  return null;
-}
-
 function pendingImagineCount() {
   return db.prepare("SELECT COUNT(*) AS n FROM imagine_jobs WHERE status = 'pending'").get()?.n || 0;
 }
@@ -1597,7 +1661,7 @@ app.post(
   "/api/media",
   express.raw({ type: () => true, limit: "25mb" }),
   wrap((req, res) => {
-    const wait = hitLimit(mediaHits, req.userId, 40, 60_000);
+    const wait = takeRateLimit(`media:${req.userId}`, 40, 60_000);
     if (wait) {
       return res.status(429).json({ error: `Upload rate limit — try again in ${wait}s.` });
     }
@@ -1623,8 +1687,7 @@ app.post(
       req.body.length,
       now()
     );
-    const base = (process.env.HUB_PUBLIC_URL || "").replace(/\/$/, "");
-    res.status(201).json({ id, url: `${base}/media/${id}`, mime });
+    res.status(201).json({ id, url: publicMediaUrl(id), mime });
   })
 );
 
@@ -1642,9 +1705,19 @@ function imagineUsage(userId) {
   };
 }
 
-function publicMediaUrl(mediaId) {
+function canonicalMediaUrl(mediaId) {
   const base = (process.env.HUB_PUBLIC_URL || "").replace(/\/$/, "");
   return `${base}/media/${mediaId}`;
+}
+
+function publicMediaUrl(mediaId, ttlSec = 7 * 24 * 3600) {
+  return appendMediaSig(canonicalMediaUrl(mediaId), mediaId, ttlSec);
+}
+
+function signedMediaUrl(url, ttlSec) {
+  const id = parseMediaId(url);
+  if (!id) return url || null;
+  return publicMediaUrl(id, ttlSec);
 }
 
 /** Only hub-owned images may be sent to xAI — never an arbitrary caller URL. */
@@ -1653,7 +1726,7 @@ function ownedHubImageUrl(userId, urlOrId) {
   if (!id) return null;
   const media = db.prepare("SELECT * FROM media WHERE id = ? AND user_id = ?").get(id, userId);
   if (!media?.mime?.startsWith("image/")) return null;
-  return publicMediaUrl(media.id);
+  return publicMediaUrl(media.id, 3600);
 }
 
 function ownedMediaUrlOrNull(userId, url) {
@@ -1661,7 +1734,7 @@ function ownedMediaUrlOrNull(userId, url) {
   const id = parseMediaId(url);
   if (!id) return null;
   const media = db.prepare("SELECT id FROM media WHERE id = ? AND user_id = ?").get(id, userId);
-  return media ? publicMediaUrl(media.id) : null;
+  return media ? canonicalMediaUrl(media.id) : null;
 }
 
 function assertOwnedMediaUrl(userId, url) {
@@ -1685,7 +1758,7 @@ function saveDownloadedMedia(userId, buf, mime) {
     buf.length,
     now()
   );
-  return { id, url: publicMediaUrl(id), mime };
+  return { id, url: canonicalMediaUrl(id), mime };
 }
 
 /** Mark a job failed and refund a purchased credit if one was charged. */
@@ -1828,7 +1901,7 @@ function jobJson(row) {
     progress: row.progress ?? 0,
     prompt: row.prompt,
     error: row.error,
-    media_url: row.media_url,
+    media_url: signedMediaUrl(row.media_url),
     watermark: Boolean(row.watermark),
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -1849,7 +1922,7 @@ app.get("/api/imagine/status", wrap((req, res) => {
 
 app.post("/api/imagine/video", async (req, res) => {
   try {
-    const wait = hitLimit(imagineHits, req.userId, 20, 60_000);
+    const wait = takeRateLimit(`imagine:${req.userId}`, 20, 60_000);
     if (wait) {
       return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
     }
@@ -1981,7 +2054,7 @@ app.post("/api/imagine/video", async (req, res) => {
 
 app.post("/api/imagine/still", async (req, res) => {
   try {
-    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    const wait = takeRateLimit(`imagine:${req.userId}`, 30, 60_000);
     if (wait) {
       return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
     }
@@ -2055,7 +2128,7 @@ app.post("/api/imagine/still", async (req, res) => {
         watermark: wantWatermark,
       });
       const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
-      res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+      res.status(201).json({ ...jobJson(row), draft_media_url: signedMediaUrl(saved.url), usage: stillUsage(req.userId) });
     } catch (err) {
       completeStillJob(job.id, { error: err.message });
       throw err;
@@ -2069,7 +2142,7 @@ app.post("/api/imagine/still", async (req, res) => {
 /** 16:9 YouTube cover. Counts as a still. Does not replace the draft clip. */
 app.post("/api/imagine/thumbnail", async (req, res) => {
   try {
-    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    const wait = takeRateLimit(`imagine:${req.userId}`, 30, 60_000);
     if (wait) {
       return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
     }
@@ -2154,7 +2227,7 @@ app.post("/api/imagine/thumbnail", async (req, res) => {
       const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
       res.status(201).json({
         ...jobJson(row),
-        thumbnail_url: saved.url,
+        thumbnail_url: signedMediaUrl(saved.url),
         usage: stillUsage(req.userId),
       });
     } catch (err) {
@@ -2170,7 +2243,7 @@ app.post("/api/imagine/thumbnail", async (req, res) => {
 /** Edit an existing draft photo with Grok Imagine (counts toward still allowance). */
 app.post("/api/imagine/edit", async (req, res) => {
   try {
-    const wait = hitLimit(imagineHits, req.userId, 30, 60_000);
+    const wait = takeRateLimit(`imagine:${req.userId}`, 30, 60_000);
     if (wait) {
       return res.status(429).json({ error: `AI generation rate limit — try again in ${wait}s.` });
     }
@@ -2236,7 +2309,7 @@ app.post("/api/imagine/edit", async (req, res) => {
       replaceDraftMedia(draft, saved.url);
       completeStillJob(job.id, { mediaUrl: saved.url });
       const row = db.prepare("SELECT * FROM imagine_jobs WHERE id = ?").get(job.id);
-      res.status(201).json({ ...jobJson(row), draft_media_url: saved.url, usage: stillUsage(req.userId) });
+      res.status(201).json({ ...jobJson(row), draft_media_url: signedMediaUrl(saved.url), usage: stillUsage(req.userId) });
     } catch (err) {
       completeStillJob(job.id, { error: err.message });
       throw err;

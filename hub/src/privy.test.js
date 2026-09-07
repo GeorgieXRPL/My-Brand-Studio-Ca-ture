@@ -6,11 +6,20 @@ test("prefers a linked email account", () => {
   const email = emailFromPrivyProfile({
     linked_accounts: [
       { type: "wallet", address: "0xabc" },
-      { type: "email", address: "Ada@Example.com" },
+      { type: "email", address: "Ada@Example.com", first_verified_at: 1 },
       { type: "google_oauth", email: "other@example.com" },
     ],
   });
   assert.equal(email, "ada@example.com");
+});
+
+test("ignores unverified email accounts", () => {
+  assert.equal(
+    emailFromPrivyProfile({
+      linked_accounts: [{ type: "email", address: "Ada@Example.com" }],
+    }),
+    ""
+  );
 });
 
 test("falls back to oauth email and camelCase linkedAccounts", () => {

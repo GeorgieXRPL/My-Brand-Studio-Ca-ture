@@ -112,6 +112,7 @@ export interface Me {
   credits_checkout?: boolean;
   has_stripe_customer?: boolean;
   terms_accepted_at?: string | null;
+  email_verified?: boolean;
 }
 
 export type ImagineStatus = {

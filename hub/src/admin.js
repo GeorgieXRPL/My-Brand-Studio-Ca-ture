@@ -4,7 +4,8 @@
  */
 import { db, mediaDir } from "./db.js";
 import { PLAN_PRICES, VIDEO_CREDIT_PACKS } from "./plans.js";
-import { resolveSession, setUserDisabled } from "./auth.js";
+import { setUserDisabled, resolveSession } from "./auth.js";
+import { appendMediaSig } from "./mediaSign.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -93,6 +94,22 @@ export function createCryptoInvoice({
       now()
     );
   return db.prepare("SELECT * FROM crypto_invoices WHERE id = ?").get(info.lastInsertRowid);
+}
+
+/** Unique USDC/USDT expected_raw among pending invoices on the same rail. */
+export function uniqueStableExpectedRaw(chain, asset, amountUsd) {
+  const base = Math.round(Number(amountUsd) * 1e6);
+  for (let i = 0; i < 200; i++) {
+    const raw = String(base + i * 10000);
+    const clash = db
+      .prepare(
+        `SELECT id FROM crypto_invoices
+         WHERE status = 'pending' AND lower(chain) = lower(?) AND upper(asset) = upper(?) AND expected_raw = ?`
+      )
+      .get(chain, asset, raw);
+    if (!clash) return raw;
+  }
+  return String(base + (Date.now() % 90_000));
 }
 
 export function markCryptoPaid(invoiceId, adminNote = "") {
@@ -503,7 +520,16 @@ export function registerAdminRoutes(app) {
          ORDER BY j.id DESC LIMIT 40`
       )
       .all();
-    res.json({ jobs });
+    res.json({
+      jobs: jobs.map((j) => {
+        const id = String(j.media_url || "")
+          .split("?")[0]
+          .split("/")
+          .pop();
+        if (!id || !/^[a-f0-9]{32}$/i.test(id)) return j;
+        return { ...j, media_url: appendMediaSig(String(j.media_url).split("?")[0], id, 24 * 3600) };
+      }),
+    });
   });
 
   app.get("/api/admin/crypto/invoices", (req, res) => {

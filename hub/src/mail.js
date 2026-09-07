@@ -15,6 +15,24 @@ export async function notifyOwner({ subject, text }) {
     console.log("[mail:skip]", subject);
     return false;
   }
+  return sendResend({ to: [OWNER], subject, text });
+}
+
+export async function sendUserMail({ to, subject, text }) {
+  const email = String(to || "").trim().toLowerCase();
+  if (!email || !email.includes("@") || email.endsWith(".invalid") || email.endsWith("@selfhost.local")) {
+    return false;
+  }
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    console.log("[mail:user:skip]", email, subject);
+    return false;
+  }
+  return sendResend({ to: [email], subject, text });
+}
+
+async function sendResend({ to, subject, text }) {
+  const key = process.env.RESEND_API_KEY;
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -22,7 +40,7 @@ export async function notifyOwner({ subject, text }) {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ from: FROM, to: [OWNER], subject, text }),
+      body: JSON.stringify({ from: FROM, to, subject, text }),
     });
     if (!res.ok) {
       console.error("[mail]", res.status, await res.text());

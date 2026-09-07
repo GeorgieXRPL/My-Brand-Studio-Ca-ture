@@ -63,11 +63,14 @@ export default function Setup() {
   const toast = useToast();
   const { t, locale, setLocale } = useLocale();
   const navigate = useNavigate();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"signin" | "signup">("signup");
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot" | "reset">(
+    params.get("reset") ? "reset" : "signup"
+  );
+  const [resetToken, setResetToken] = useState(params.get("reset") || "");
   const [authBusy, setAuthBusy] = useState(false);
   const [signedInAs, setSignedInAs] = useState(isSelfHost() ? "" : getAuthEmail());
 
@@ -102,13 +105,14 @@ export default function Setup() {
     methodId?: string;
     details?: {
       amount_usd: number;
+      send_amount: string | null;
       chain: string;
       asset: string;
       label: string;
       pay_to: string;
       token: string | null;
       note: string;
-      invoice_id: number;
+      invoice_id?: number;
     };
   } | null>(null);
   const [googleAvailable, setGoogleAvailable] = useState(false);
@@ -127,6 +131,12 @@ export default function Setup() {
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.slice(1));
+    const strip = (...keys: string[]) => {
+      const next = new URLSearchParams(params);
+      for (const k of keys) next.delete(k);
+      setParams(next, { replace: true });
+    };
+
     if (hash.get("gtoken")) {
       clearHubConfig();
       setAuth(hash.get("gtoken")!, hash.get("gemail") || "");
@@ -136,6 +146,39 @@ export default function Setup() {
     } else if (hash.get("gerror")) {
       toast(hash.get("gerror")!);
       window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } else if (params.get("gerror")) {
+      toast(params.get("gerror")!);
+      strip("gerror");
+    } else if (params.get("gcode")) {
+      const code = params.get("gcode")!;
+      strip("gcode");
+      void api
+        .googleExchange(code)
+        .then((result) => {
+          clearHubConfig();
+          setAuth(result.token, result.email);
+          setSignedInAs(result.email);
+          toast(t("Signed in with Google"));
+          loadProfile();
+        })
+        .catch((e: { message?: string }) => toast(e.message || t("Google sign-in failed")));
+    } else if (params.get("confirm")) {
+      const token = params.get("confirm")!;
+      strip("confirm");
+      void api
+        .verifyEmail(token)
+        .then(() => {
+          toast(t("Email confirmed"));
+          loadProfile();
+        })
+        .catch((e: { message?: string }) => toast(e.message || t("This confirmation link is invalid or expired.")));
+    }
+
+    const reset = params.get("reset");
+    if (reset) {
+      setResetToken(reset);
+      setMode("reset");
+      strip("reset");
     }
 
     if (params.get("billing") === "success") {
@@ -375,6 +418,7 @@ export default function Setup() {
         methodId,
         details: {
           amount_usd: inv.amount_usd,
+          send_amount: inv.send_amount,
           chain: inv.chain,
           asset: inv.asset,
           label: inv.label,
@@ -444,6 +488,40 @@ export default function Setup() {
   }
 
   async function submitAuth() {
+    if (mode === "forgot") {
+      if (!email.trim()) return;
+      setAuthBusy(true);
+      try {
+        await api.forgotPassword(email.trim());
+        toast(t("Check your email for a reset link."));
+        setMode("signin");
+      } catch (e: any) {
+        toast(e.message);
+      } finally {
+        setAuthBusy(false);
+      }
+      return;
+    }
+    if (mode === "reset") {
+      if (!password || !resetToken) return;
+      setAuthBusy(true);
+      try {
+        const result = await api.resetPassword(resetToken, password);
+        clearHubConfig();
+        setAuth(result.token, result.email);
+        setSignedInAs(result.email);
+        setPassword("");
+        setResetToken("");
+        setParams(new URLSearchParams(), { replace: true });
+        toast(t("Password updated. You're signed in."));
+        loadProfile();
+      } catch (e: any) {
+        toast(e.message);
+      } finally {
+        setAuthBusy(false);
+      }
+      return;
+    }
     if (!email.trim() || !password) return;
     if (mode === "signup" && !termsAgreed) {
       toast(t("Please agree to the Terms and Privacy Policy"));
@@ -711,6 +789,23 @@ export default function Setup() {
           {signedInAs ? (
             <>
               <p className="card-desc">{signedInAs} — {t("ideas, drafts and schedule sync here.")}</p>
+              {me && me.email_verified === false && (
+                <p className="muted small" style={{ marginBottom: 12 }}>
+                  {t("We sent a confirmation link to your inbox.")}{" "}
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() =>
+                      void api
+                        .resendVerify()
+                        .then(() => toast(t("Confirmation sent")))
+                        .catch((e: { message?: string }) => toast(e.message || t("Could not send email")))
+                    }
+                  >
+                    {t("Resend confirmation")}
+                  </button>
+                </p>
+              )}
               <Link to="/desk" className="btn block" style={{ textDecoration: "none", marginBottom: 12 }}>
                 <MonitorIcon size={16} />
                 Open desk
@@ -827,7 +922,7 @@ export default function Setup() {
           ) : (
             <>
               <p className="card-desc">{t("Speak an idea. Get posts for every platform. Free to start.")}</p>
-              {privyEnabled() && (
+              {(mode === "signin" || mode === "signup") && privyEnabled() && (
                 <>
                   <Suspense fallback={<button type="button" className="btn privy-btn block" disabled />}>
                     <PrivyButton />
@@ -838,7 +933,7 @@ export default function Setup() {
                   </p>
                 </>
               )}
-              {googleAvailable && !privyEnabled() && (
+              {(mode === "signin" || mode === "signup") && googleAvailable && !privyEnabled() && (
                 <>
                   <GoogleButton />
                   <p className="muted small" style={{ marginTop: 8, textAlign: "center" }}>
@@ -847,7 +942,7 @@ export default function Setup() {
                   </p>
                 </>
               )}
-              {(privyEnabled() || googleAvailable) && (
+              {(mode === "signin" || mode === "signup") && (privyEnabled() || googleAvailable) && (
                 <div className="auth-divider">{t("or use email")}</div>
               )}
               <form
@@ -858,33 +953,43 @@ export default function Setup() {
                 }}
                 autoComplete="on"
               >
-                <label htmlFor="auth-email">{t("Email")}</label>
-                <input
-                  id="auth-email"
-                  name="email"
-                  type="email"
-                  inputMode="email"
-                  autoComplete="username"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  required
-                />
-                <label htmlFor="auth-password">{t("Password")}</label>
-                <input
-                  id="auth-password"
-                  name="password"
-                  type="password"
-                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                  placeholder={mode === "signup" ? t("At least 8 characters") : t("Your password")}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={mode === "signup" ? 8 : undefined}
-                />
+                {mode !== "reset" && (
+                  <>
+                    <label htmlFor="auth-email">{t("Email")}</label>
+                    <input
+                      id="auth-email"
+                      name="email"
+                      type="email"
+                      inputMode="email"
+                      autoComplete="username"
+                      placeholder="you@example.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      required
+                    />
+                  </>
+                )}
+                {mode !== "forgot" && (
+                  <>
+                    <label htmlFor="auth-password">{mode === "reset" ? t("Set a new password") : t("Password")}</label>
+                    <input
+                      id="auth-password"
+                      name="password"
+                      type="password"
+                      autoComplete={mode === "signup" || mode === "reset" ? "new-password" : "current-password"}
+                      placeholder={
+                        mode === "signup" || mode === "reset" ? t("At least 8 characters") : t("Your password")
+                      }
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      minLength={mode === "signup" || mode === "reset" ? 8 : undefined}
+                    />
+                  </>
+                )}
                 {mode === "signup" && (
                   <label className="terms-check" htmlFor="auth-terms">
                     <input
@@ -910,22 +1015,41 @@ export default function Setup() {
                   className="btn primary block"
                   style={{ marginTop: 14 }}
                   disabled={
-                    !email.trim() ||
-                    !password ||
                     authBusy ||
+                    (mode === "forgot" ? !email.trim() : !password) ||
+                    (mode !== "reset" && mode !== "forgot" && !email.trim()) ||
                     (mode === "signup" && !termsAgreed)
                   }
                 >
-                  {authBusy ? <span className="spinner" /> : mode === "signup" ? t("setup.createAccount") : t("setup.signIn")}
+                  {authBusy ? (
+                    <span className="spinner" />
+                  ) : mode === "signup" ? (
+                    t("setup.createAccount")
+                  ) : mode === "forgot" ? (
+                    t("Send reset link")
+                  ) : mode === "reset" ? (
+                    t("Set a new password")
+                  ) : (
+                    t("setup.signIn")
+                  )}
                 </button>
               </form>
+              {mode === "signin" && (
+                <button type="button" className="btn ghost block" style={{ marginTop: 8 }} onClick={() => setMode("forgot")}>
+                  {t("Forgot password?")}
+                </button>
+              )}
               <button
                 type="button"
                 className="btn ghost block"
                 style={{ marginTop: 8 }}
-                onClick={() => setMode(mode === "signup" ? "signin" : "signup")}
+                onClick={() => setMode(mode === "signup" || mode === "forgot" || mode === "reset" ? "signin" : "signup")}
               >
-                {mode === "signup" ? t("Have an account? Sign in") : t("New here? Create an account")}
+                {mode === "forgot" || mode === "reset"
+                  ? t("Back to sign in")
+                  : mode === "signup"
+                    ? t("Have an account? Sign in")
+                    : t("New here? Create an account")}
               </button>
             </>
           )}
@@ -1470,7 +1594,10 @@ export default function Setup() {
                 <>
                   <div className="sheet-title">{t("Pay with crypto")}</div>
                   <p className="crypto-pay-amount">
-                    ${cryptoPay.details.amount_usd} USD · {cryptoPay.details.label}
+                    {cryptoPay.details.send_amount
+                      ? `${cryptoPay.details.send_amount} ${cryptoPay.details.asset}`
+                      : `$${cryptoPay.details.amount_usd} USD`}{" "}
+                    · {cryptoPay.details.label}
                   </p>
                   <p className="muted small" style={{ marginTop: 0 }}>
                     {t(

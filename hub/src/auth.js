@@ -1,6 +1,6 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { db, bootstrapUser, ensureRefCode } from "./db.js";
-import { formatAuthMail, mailConfigured, notifyOwner, recordAuthEvent, shouldNotifyLogin } from "./mail.js";
+import { formatAuthMail, mailConfigured, notifyOwner, recordAuthEvent, sendUserMail, shouldNotifyLogin } from "./mail.js";
 
 const now = () => new Date().toISOString();
 
@@ -52,6 +52,113 @@ export function resolveSession(token) {
 
 export function destroySession(token) {
   db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(sha256(token));
+}
+
+export function destroySessionsForUser(userId) {
+  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+}
+
+export function createAuthToken(kind, { userId = 0, email = "" } = {}, ttlMs) {
+  const token = randomBytes(24).toString("hex");
+  db.prepare(
+    "INSERT INTO auth_tokens (kind, token_hash, user_id, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(
+    kind,
+    sha256(token),
+    userId || 0,
+    String(email || "").trim().toLowerCase(),
+    new Date(Date.now() + ttlMs).toISOString(),
+    now()
+  );
+  return token;
+}
+
+export function consumeAuthToken(kind, token) {
+  const raw = String(token || "").trim();
+  if (raw.length < 16 || raw.length > 128) return null;
+  const hash = sha256(raw);
+  const row = db.transaction(() => {
+    const found = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ? AND kind = ?").get(hash, kind);
+    if (!found) return null;
+    db.prepare("DELETE FROM auth_tokens WHERE token_hash = ? AND kind = ?").run(hash, kind);
+    return found;
+  })();
+  if (!row) return null;
+  if (Date.parse(row.expires_at) < Date.now()) return null;
+  return row;
+}
+
+export function requestEmailVerification(userId, email) {
+  db.prepare("DELETE FROM auth_tokens WHERE kind = 'verify' AND user_id = ?").run(userId);
+  return createAuthToken("verify", { userId, email }, 48 * 3600e3);
+}
+
+export function verifyEmailToken(token) {
+  const row = consumeAuthToken("verify", token);
+  if (!row?.user_id) throw httpError(400, "This confirmation link is invalid or expired.");
+  db.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?").run(now(), row.user_id);
+  const user = db.prepare("SELECT id, email FROM users WHERE id = ?").get(row.user_id);
+  if (!user) throw httpError(400, "This confirmation link is invalid or expired.");
+  return user;
+}
+
+export function requestPasswordReset(email) {
+  email = (email || "").trim().toLowerCase();
+  if (!EMAIL_RE.test(email)) return null;
+  const user = db
+    .prepare("SELECT id, email, password_hash, disabled_at FROM users WHERE email = ?")
+    .get(email);
+  if (!user?.password_hash || user.disabled_at) return null;
+  db.prepare("DELETE FROM auth_tokens WHERE kind = 'reset' AND user_id = ?").run(user.id);
+  const token = createAuthToken("reset", { userId: user.id, email: user.email }, 60 * 60e3);
+  return { token, email: user.email, userId: user.id };
+}
+
+export function resetPassword(token, password) {
+  password = password || "";
+  if (password.length < 8) throw httpError(400, "Password must be at least 8 characters.");
+  if (password.length > MAX_PASSWORD_LENGTH) throw httpError(400, "Password is too long.");
+  const row = consumeAuthToken("reset", token);
+  if (!row?.user_id) throw httpError(400, "This reset link is invalid or expired.");
+  db.prepare("UPDATE users SET password_hash = ?, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?").run(
+    hashPassword(password),
+    now(),
+    row.user_id
+  );
+  destroySessionsForUser(row.user_id);
+  db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(row.user_id);
+  return db.prepare("SELECT id, email FROM users WHERE id = ?").get(row.user_id);
+}
+
+export function sendVerifyEmail(userId, email, appOrigin) {
+  const token = requestEmailVerification(userId, email);
+  const link = `${String(appOrigin || "").replace(/\/$/, "")}/setup?confirm=${encodeURIComponent(token)}`;
+  void sendUserMail({
+    to: email,
+    subject: "Confirm your Brand Studio email",
+    text: [
+      "Confirm this email for your Brand Studio account.",
+      "",
+      link,
+      "",
+      "This link expires in 48 hours. If you didn't create an account, you can ignore this.",
+    ].join("\n"),
+  });
+}
+
+export function sendResetEmail(reset, appOrigin) {
+  const link = `${String(appOrigin || "").replace(/\/$/, "")}/setup?reset=${encodeURIComponent(reset.token)}`;
+  void sendUserMail({
+    to: reset.email,
+    subject: "Reset your Brand Studio password",
+    text: [
+      "Reset the password for your Brand Studio account.",
+      "",
+      link,
+      "",
+      "This link expires in 1 hour. If you didn't ask for a reset, you can ignore this.",
+    ].join("\n"),
+  });
 }
 
 // ---- Signup / login ----
@@ -124,7 +231,7 @@ export function getUser(userId) {
     .prepare(
       `SELECT id, email, tier, bonus_drafts, COALESCE(video_credits, 0) AS video_credits,
               stripe_customer_id, stripe_subscription_id, created_at,
-              terms_accepted_at, disabled_at
+              terms_accepted_at, disabled_at, email_verified_at
        FROM users WHERE id = ?`
     )
     .get(userId);
@@ -151,42 +258,54 @@ export function acceptTerms(userId) {
 export function setUserDisabled(userId, disabled) {
   if (disabled) {
     db.prepare("UPDATE users SET disabled_at = ? WHERE id = ?").run(now(), userId);
-    db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    destroySessionsForUser(userId);
     db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
   } else {
     db.prepare("UPDATE users SET disabled_at = NULL WHERE id = ?").run(userId);
   }
 }
 
-// Google-verified email: link to the existing account or create a
-// password-less one (they'll always sign in via Google).
+function reclaimUnverifiedPasswordAccount(existing, { privyDid } = {}) {
+  const ts = now();
+  db.prepare(
+    "UPDATE users SET password_hash = NULL, email_verified_at = ?, privy_did = COALESCE(?, privy_did) WHERE id = ?"
+  ).run(ts, privyDid || null, existing.id);
+  destroySessionsForUser(existing.id);
+  db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(existing.id);
+  return { id: existing.id, email: existing.email, created: false };
+}
+
 export function findOrCreateGoogleUser(email, { refCode } = {}) {
   email = email.trim().toLowerCase();
   const existing = db
-    .prepare("SELECT id, email, disabled_at, password_hash FROM users WHERE email = ?")
+    .prepare("SELECT id, email, disabled_at, password_hash, email_verified_at FROM users WHERE email = ?")
     .get(email);
   if (existing) {
     if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
-    // Unverified password signup must not inherit a later Google login.
-    if (existing.password_hash) {
+    if (existing.password_hash && existing.email_verified_at) {
       throw httpError(409, "An account with that email already exists. Sign in with email and password.");
     }
+    if (existing.password_hash && !existing.email_verified_at) {
+      return reclaimUnverifiedPasswordAccount(existing);
+    }
+    db.prepare("UPDATE users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?").run(
+      now(),
+      existing.id
+    );
     return { id: existing.id, email: existing.email, created: false };
   }
   const ts = now();
   const info = db
     .prepare(
-      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at) VALUES (?, NULL, ?, ?)"
+      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at, email_verified_at) VALUES (?, NULL, ?, ?, ?)"
     )
-    .run(email, ts, ts);
+    .run(email, ts, ts, ts);
   const userId = Number(info.lastInsertRowid);
   bootstrapUser(userId);
   applyReferral(userId, refCode);
   return { id: userId, email, created: true };
 }
 
-// Privy-verified identity: link by DID, then by email, else create
-// a password-less account (they'll sign in via Privy after that).
 export function findOrCreatePrivyUser(did, email, { refCode } = {}) {
   did = String(did || "").trim();
   if (!did.startsWith("did:privy:")) throw httpError(401, "Invalid Privy session.");
@@ -202,28 +321,36 @@ export function findOrCreatePrivyUser(did, email, { refCode } = {}) {
   }
 
   const existing = db
-    .prepare("SELECT id, email, privy_did, disabled_at, password_hash FROM users WHERE email = ?")
+    .prepare("SELECT id, email, privy_did, disabled_at, password_hash, email_verified_at FROM users WHERE email = ?")
     .get(email);
   if (existing) {
     if (existing.disabled_at) throw httpError(403, "This account has been disabled.");
     if (existing.privy_did && existing.privy_did !== did) {
       throw httpError(409, "That email is already linked to a different account.");
     }
-    if (existing.password_hash && !existing.privy_did) {
+    if (existing.password_hash && existing.email_verified_at && !existing.privy_did) {
       throw httpError(409, "An account with that email already exists. Sign in with email and password.");
     }
+    if (existing.password_hash && !existing.email_verified_at) {
+      return reclaimUnverifiedPasswordAccount(existing, { privyDid: did });
+    }
     if (!existing.privy_did) {
-      db.prepare("UPDATE users SET privy_did = ? WHERE id = ?").run(did, existing.id);
+      db.prepare("UPDATE users SET privy_did = ?, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?").run(
+        did,
+        now(),
+        existing.id
+      );
     }
     return { id: existing.id, email: existing.email, created: false };
   }
 
   const ts = now();
+  const verifiedAt = email.endsWith(".invalid") ? null : ts;
   const info = db
     .prepare(
-      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at, privy_did) VALUES (?, NULL, ?, ?, ?)"
+      "INSERT INTO users (email, password_hash, created_at, terms_accepted_at, privy_did, email_verified_at) VALUES (?, NULL, ?, ?, ?, ?)"
     )
-    .run(email, ts, ts, did);
+    .run(email, ts, ts, did, verifiedAt);
   const userId = Number(info.lastInsertRowid);
   bootstrapUser(userId);
   applyReferral(userId, refCode);

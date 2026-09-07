@@ -72,20 +72,38 @@ export function emailFromPrivyProfile(user) {
     : Array.isArray(user?.linkedAccounts)
       ? user.linkedAccounts
       : [];
+  const emails = [];
   for (const account of accounts) {
-    if (account?.type === "email" && account.address) {
-      return String(account.address).trim().toLowerCase();
-    }
+    if (!accountVerified(account)) continue;
+    const email = accountEmail(account);
+    if (email) emails.push({ email, prefer: String(account?.type || "") === "email" });
   }
-  for (const account of accounts) {
-    const type = String(account?.type || "");
-    if (!type.endsWith("_oauth") && type !== "apple_oauth") continue;
-    const value = account.email || account.address;
-    if (value && String(value).includes("@")) {
-      return String(value).trim().toLowerCase();
-    }
+  const preferred = emails.find((e) => e.prefer);
+  return (preferred || emails[0])?.email || "";
+}
+
+function accountEmail(account) {
+  const value = account?.address || account?.email;
+  if (!value || !String(value).includes("@")) return "";
+  return String(value).trim().toLowerCase();
+}
+
+function accountVerified(account) {
+  if (!account) return false;
+  if (account.verified === false) return false;
+  if (account.verified === true) return true;
+  if (
+    account.first_verified_at ||
+    account.verified_at ||
+    account.verifiedAt ||
+    account.firstVerifiedAt
+  ) {
+    return true;
   }
-  return "";
+  const type = String(account.type || "");
+  // Google/Apple OAuth emails are verified by the provider. Bare email
+  // accounts must carry a Privy verification timestamp.
+  return type === "google_oauth" || type === "apple_oauth";
 }
 
 export function syntheticPrivyEmail(did) {
