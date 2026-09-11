@@ -174,6 +174,8 @@ Content queue auto-publish uses the same tier rules as Post (Studio for unified 
 
 Create an API key on the **Agents** page (Setup → Manage agents), then call the same REST API the app uses. The page also has copy-paste setup instructions to feed straight into your agent.
 
+**Salt Bubble:** after you create a key, tap **Open Salt Bubble** (or copy the pair link). That writes hub URL + `ak_…` into the phone HUD via `saltbubble://pair?hub=&key=`. Landing page: `/salt-bubble/pair`. The key can save ideas only — it cannot publish.
+
 ```bash
 HUB=https://brand-studio-hub.fly.dev
 KEY=ak_...   # from the Agents page (Studio tier)

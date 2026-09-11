@@ -10,6 +10,7 @@ import Schedule from "./screens/Schedule";
 import Workouts from "./screens/Workouts";
 import Setup from "./screens/Setup";
 import Agents from "./screens/Agents";
+import SaltBubblePair from "./screens/SaltBubblePair";
 import Insights from "./screens/Insights";
 import Legal from "./screens/Legal";
 import Desk from "./screens/Desk";
@@ -37,6 +38,7 @@ export default function App() {
   const t = useT();
   const location = useLocation();
   const isDesk = location.pathname.startsWith("/desk");
+  const isSaltPair = location.pathname.startsWith("/salt-bubble");
 
   useEffect(() => {
     const ref = new URLSearchParams(window.location.search).get("ref");
@@ -56,6 +58,7 @@ export default function App() {
           <Route path="/terms" element={<Legal kind="terms" />} />
           <Route path="/privacy" element={<Legal kind="privacy" />} />
           <Route path="/agents" element={<Agents />} />
+          <Route path="/salt-bubble/pair" element={<SaltBubblePair />} />
           <Route path="/insights" element={<Insights />} />
           <Route path="/desk" element={<Desk />} />
           <Route path="*" element={<Navigate to="/capture" replace />} />
@@ -63,7 +66,7 @@ export default function App() {
       </div>
       {privyEnabled() ? <PrivyBinderHost /> : null}
       <PostReminderHost />
-      {isDesk ? null : (
+      {isDesk || isSaltPair ? null : (
         <nav className="nav">
           {tabDefs.map((tab) => (
             <NavLink

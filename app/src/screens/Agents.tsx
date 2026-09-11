@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, getHubUrl, isConfigured } from "../lib/api";
 import { agentInstructions } from "../lib/agentBrief";
+import { buildSaltBubblePair, saltBubbleDeepLink, saltBubbleWebPairUrl } from "../lib/saltBubblePair";
 import { useToast } from "../lib/toast";
 import { copyText } from "../lib/share";
 import { ChartIcon, CopyIcon, KeyIcon, PlugIcon, TrashIcon } from "../lib/icons";
@@ -10,6 +11,11 @@ import { useT } from "../lib/i18n";
 
 // Recommended agent platforms users can bring. Referral-tagged links.
 const AGENT_DIRECTORY = [
+  {
+    name: "Salt Bubble",
+    desc: "Phone HUD — speak on the overlay, pair with a key above, ideas land in your backlog.",
+    url: "https://github.com/GeorgieXRPL/salt-bubble",
+  },
   {
     name: "Grok (Cursor)",
     desc: "Paste the instructions into a Cursor Grok chat. It drafts via the hub; you approve on Desk.",
@@ -124,6 +130,32 @@ export default function Agents() {
             <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => setFreshKey(null)}>
               {t("Done — I saved it")}
             </button>
+            {(() => {
+              try {
+                const pair = buildSaltBubblePair({ hub: getHubUrl(), key: freshKey });
+                const deep = saltBubbleDeepLink(pair);
+                const web = saltBubbleWebPairUrl(pair);
+                return (
+                  <div style={{ marginTop: 14 }}>
+                    <p className="card-desc">
+                      Pair Salt Bubble on this phone. The key can save spoken ideas — it cannot publish.
+                    </p>
+                    <a className="btn primary sm" href={deep} style={{ textDecoration: "none", display: "inline-block", marginTop: 8 }}>
+                      Open Salt Bubble
+                    </a>
+                    <button
+                      className="btn ghost sm"
+                      style={{ marginLeft: 8, marginTop: 8 }}
+                      onClick={() => copy(web, "Pair link copied — open it on the phone")}
+                    >
+                      Copy pair link
+                    </button>
+                  </div>
+                );
+              } catch {
+                return null;
+              }
+            })()}
           </div>
         )}
         {stats?.keys.map((k) => (
