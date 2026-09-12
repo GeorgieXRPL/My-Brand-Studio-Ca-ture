@@ -673,6 +673,14 @@ const PHRASES = [
   "Google sign-in failed",
   "This confirmation link is invalid or expired.",
   "Could not send email",
+  "Selfie",
+  "Rear",
+  "Switch camera",
+  "Switching camera…",
+  "Couldn't switch to the selfie camera.",
+  "Couldn't switch to the rear camera.",
+  "Try selfie",
+  "Try rear",
 ] as const;
 
 // New keys use English until dedicated locale translations are supplied.

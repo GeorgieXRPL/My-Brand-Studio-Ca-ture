@@ -9,44 +9,117 @@ type Facing = "user" | "environment";
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
+const FACING_KEY = "bs.cameraFacing";
 
 type ZoomCaps = { min: number; max: number } | null;
 
-function touchDist(a: Touch, b: Touch) {
-  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+function isPhone() {
+  return typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+}
+
+function isAppleMobile() {
+  return typeof navigator !== "undefined" && /iP(hone|ad)|Macintosh/.test(navigator.userAgent) && "ontouchend" in document;
 }
 
 function defaultFacing(): Facing {
   if (typeof navigator === "undefined") return "user";
-  return /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "environment" : "user";
+  try {
+    const saved = sessionStorage.getItem(FACING_KEY);
+    if (saved === "user" || saved === "environment") return saved;
+  } catch {
+    /* ignore */
+  }
+  return isPhone() ? "environment" : "user";
+}
+
+function rememberFacing(facing: Facing) {
+  try {
+    sessionStorage.setItem(FACING_KEY, facing);
+  } catch {
+    /* ignore */
+  }
+}
+
+function touchDist(a: Touch, b: Touch) {
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 }
 
 function stopStream(stream: MediaStream | null) {
   stream?.getTracks().forEach((track) => track.stop());
 }
 
-function isFrontTrack(track: MediaStreamTrack | undefined, requested: Facing): boolean {
+function facingFromTrack(track: MediaStreamTrack | undefined, requested: Facing): Facing {
   const mode = track?.getSettings?.().facingMode;
-  if (mode === "user" || mode === "environment") return mode === "user";
-  return requested === "user";
+  if (mode === "user" || mode === "environment") return mode;
+  const label = (track?.label || "").toLowerCase();
+  if (!label) return requested;
+  if (/front|face|facetime/.test(label) && !/back|rear/.test(label)) return "user";
+  if (/back|rear/.test(label) && !/front/.test(label)) return "environment";
+  return requested;
+}
+
+function streamLooksLike(stream: MediaStream, want: Facing): boolean {
+  const track = stream.getVideoTracks()[0];
+  const mode = track?.getSettings?.().facingMode;
+  const label = (track?.label || "").toLowerCase();
+  if (!mode && !label) return true;
+  return facingFromTrack(track, want) === want;
 }
 
 async function pickDeviceId(want: Facing): Promise<string | null> {
   if (!navigator.mediaDevices?.enumerateDevices) return null;
   try {
     const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
-    if (!cams.length) return null;
-    const hit = cams.find((d) => {
-      const n = d.label.toLowerCase();
-      if (!n) return false;
-      return want === "user"
-        ? /front|user|face|facetime|webcam/.test(n)
-        : /back|rear|environment|wide|ultra/.test(n);
-    });
-    return hit?.deviceId || null;
+    let best: { id: string; score: number } | null = null;
+    for (const cam of cams) {
+      const n = cam.label.toLowerCase();
+      if (!n) continue;
+      let score = 0;
+      if (want === "user") {
+        if (/front|face|facetime/.test(n) && !/back|rear/.test(n)) score = 10;
+        else if (/webcam|user/.test(n) && !/back|rear|desk/.test(n)) score = 5;
+      } else if (!/front|face|facetime/.test(n)) {
+        if (/back camera|rear camera/.test(n)) score = 10;
+        else if (/back|rear/.test(n)) score = /ultra|telephoto/.test(n) ? 4 : /wide|dual|triple/.test(n) ? 7 : 8;
+      }
+      if (score && (!best || score > best.score)) best = { id: cam.deviceId, score };
+    }
+    return best?.id || null;
   } catch {
     return null;
   }
+}
+
+async function openCamera(want: Facing, wantAudio: boolean): Promise<MediaStream> {
+  const deviceId = await pickDeviceId(want);
+  const videos: MediaTrackConstraints[] = [{ facingMode: { exact: want } }, { facingMode: want }];
+  if (deviceId) {
+    videos.push({ deviceId: { exact: deviceId }, facingMode: { exact: want } });
+    videos.push({ deviceId: { exact: deviceId } });
+  }
+  videos.push({ facingMode: { ideal: want }, width: { ideal: 1280 }, height: { ideal: 720 } });
+  videos.push({ facingMode: { ideal: want } });
+
+  const audioOpts: Array<boolean | MediaTrackConstraints> = wantAudio
+    ? [true, { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, false]
+    : [false];
+
+  let lastErr: unknown;
+  for (const audio of audioOpts) {
+    for (const video of videos) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video, audio });
+        if (!streamLooksLike(stream, want)) {
+          stopStream(stream);
+          continue;
+        }
+        return stream;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  throw lastErr || new Error("no camera");
 }
 
 export default function CameraCapture({
@@ -65,8 +138,7 @@ export default function CameraCapture({
   const aliveRef = useRef(true);
   const zoomRef = useRef(1);
   const hwZoomRef = useRef<ZoomCaps>(null);
-  const facingRef = useRef<Facing>(defaultFacing());
-  const frontRef = useRef(facingRef.current === "user");
+  const frontRef = useRef(defaultFacing() === "user");
   const pinchRef = useRef<{ active: boolean; startDist: number; startZoom: number }>({
     active: false,
     startDist: 0,
@@ -81,8 +153,6 @@ export default function CameraCapture({
   const [zoom, setZoom] = useState(1);
   const [canFlip, setCanFlip] = useState(true);
   const [hasMic, setHasMic] = useState(true);
-
-  facingRef.current = facing;
 
   function previewTransform(): string {
     const mirror = frontRef.current ? "scaleX(-1)" : "";
@@ -138,105 +208,86 @@ export default function CameraCapture({
       hwZoomRef.current = null;
       zoomRef.current = 1;
       setZoom(1);
+      const video = videoRef.current;
+      if (video) video.srcObject = null;
       stopStream(streamRef.current);
       streamRef.current = null;
-      // iOS will not switch lenses unless the previous tracks are fully released.
-      await new Promise((r) => window.setTimeout(r, 40));
+      // iOS keeps the previous lens until tracks are fully released.
+      await new Promise((r) => window.setTimeout(r, isAppleMobile() ? 280 : 80));
       if (cancelled) return;
 
       const wantAudio = mode === "video";
       const want = facing;
-      const deviceId = await pickDeviceId(want);
-      const videoOnly: MediaStreamConstraints[] = [];
-      if (deviceId) videoOnly.push({ video: { deviceId: { exact: deviceId } }, audio: false });
-      videoOnly.push(
-        {
-          video: { facingMode: { ideal: want }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-          audio: false,
-        },
-        {
-          video: { facingMode: { ideal: want }, width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false,
-        },
-        { video: { facingMode: { ideal: want } }, audio: false },
-        { video: true, audio: false }
-      );
-      const attempts: MediaStreamConstraints[] = wantAudio
-        ? [
-            ...videoOnly.map((c) => ({ ...c, audio: true })),
-            ...videoOnly.map((c) => ({
-              ...c,
-              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            })),
-            ...videoOnly,
-          ]
-        : videoOnly;
 
-      let lastErr: unknown;
-      let stream: MediaStream | null = null;
-      for (const constraints of attempts) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-          break;
-        } catch (e) {
-          lastErr = e;
-        }
+      let stream: MediaStream;
+      try {
+        stream = await openCamera(want, wantAudio);
+      } catch (lastErr) {
+        if (cancelled) return;
+        const e = lastErr as { name?: string };
+        setError(
+          e?.name === "NotAllowedError" || e?.name === "PermissionDeniedError"
+            ? t("Camera access was blocked. Allow the camera for this site in your browser settings.")
+            : want === "user"
+              ? t("Couldn't switch to the selfie camera.")
+              : t("Couldn't switch to the rear camera.")
+        );
+        return;
       }
 
       if (stream && wantAudio && !liveAudioTracks(stream).length) {
         try {
           const mic = await requestMicrophone();
-          for (const t of mic.getAudioTracks()) stream.addTrack(t);
+          for (const track of mic.getAudioTracks()) stream.addTrack(track);
         } catch {
           /* record picture without sound */
         }
       }
 
-      if (stream) {
-        try {
-          if (cancelled) {
-            stopStream(stream);
-            return;
-          }
-          enableAudioTracks(stream);
-          streamRef.current = stream;
-          setHasMic(!wantAudio || liveAudioTracks(stream).length > 0);
-          const track = stream.getVideoTracks()[0];
-          frontRef.current = isFrontTrack(track, want);
-          const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
-            zoom?: { min: number; max: number };
-          };
-          if (caps?.zoom && typeof caps.zoom.min === "number" && caps.zoom.max > caps.zoom.min) {
-            hwZoomRef.current = { min: caps.zoom.min, max: caps.zoom.max };
-          }
-          const video = videoRef.current;
-          if (video) {
-            video.srcObject = stream;
-            video.muted = true;
-            video.playsInline = true;
-            video.setAttribute("playsinline", "true");
-            applyPreviewTransform();
-            await video.play();
-          }
-          try {
-            const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
-            setCanFlip(cams.length > 1);
-          } catch {
-            setCanFlip(true);
-          }
-          setReady(true);
+      try {
+        if (cancelled) {
+          stopStream(stream);
           return;
-        } catch (e) {
-          lastErr = e;
         }
+        enableAudioTracks(stream);
+        streamRef.current = stream;
+        setHasMic(!wantAudio || liveAudioTracks(stream).length > 0);
+        const track = stream.getVideoTracks()[0];
+        const actual = facingFromTrack(track, want);
+        frontRef.current = actual === "user";
+        rememberFacing(actual);
+        const caps = track?.getCapabilities?.() as MediaTrackCapabilities & {
+          zoom?: { min: number; max: number };
+        };
+        if (caps?.zoom && typeof caps.zoom.min === "number" && caps.zoom.max > caps.zoom.min) {
+          hwZoomRef.current = { min: caps.zoom.min, max: caps.zoom.max };
+        }
+        const node = videoRef.current;
+        if (node) {
+          node.srcObject = stream;
+          node.muted = true;
+          node.playsInline = true;
+          node.setAttribute("playsinline", "true");
+          applyPreviewTransform();
+          await node.play();
+        }
+        try {
+          const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+          setCanFlip(isPhone() || cams.length > 1);
+        } catch {
+          setCanFlip(true);
+        }
+        setReady(true);
+      } catch (e) {
+        stopStream(stream);
+        if (cancelled) return;
+        const err = e as { name?: string };
+        setError(
+          err?.name === "NotAllowedError"
+            ? t("Camera access was blocked. Allow the camera for this site in your browser settings.")
+            : t("Couldn't open the camera on this device.")
+        );
       }
-
-      const e = lastErr as { name?: string };
-      setError(
-        e?.name === "NotAllowedError"
-          ? t("Camera or microphone was blocked. Allow both for this site in your browser settings.")
-          : t("Couldn't open the camera on this device.")
-      );
     }
 
     void start();
@@ -250,10 +301,14 @@ export default function CameraCapture({
           /* ignore */
         }
       }
+      const node = videoRef.current;
+      if (node) node.srcObject = null;
       stopStream(streamRef.current);
       streamRef.current = null;
     };
-  }, [mode, facing, t]);
+    // Restart only when the user changes photo/video or selfie/rear.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, facing]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -359,9 +414,14 @@ export default function CameraCapture({
     setRecording(false);
   }
 
+  function setLens(next: Facing) {
+    if (recording || next === facing) return;
+    setFacing(next);
+    rememberFacing(next);
+  }
+
   function flipCamera() {
-    if (recording) return;
-    setFacing((cur) => (cur === "user" ? "environment" : "user"));
+    setLens(facing === "user" ? "environment" : "user");
   }
 
   return createPortal(
@@ -383,21 +443,44 @@ export default function CameraCapture({
       {error ? (
         <div className="camera-error">
           <p>{error}</p>
-          <button type="button" className="btn primary" onClick={onClose}>
-            {t("Close")}
-          </button>
+          <div className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn" onClick={() => setFacing((cur) => (cur === "user" ? "environment" : "user"))}>
+              {facing === "user" ? t("Try rear") : t("Try selfie")}
+            </button>
+            <button type="button" className="btn primary" onClick={onClose}>
+              {t("Close")}
+            </button>
+          </div>
         </div>
       ) : (
         <>
           <div ref={stageRef} className="camera-stage">
             <video ref={videoRef} className="camera-video" playsInline muted autoPlay />
+            {ready && (
+              <div className="camera-lens" aria-hidden="true">
+                {facing === "user" ? t("Selfie") : t("Rear")}
+              </div>
+            )}
             {ready && zoom > 1.02 && <div className="camera-zoom-hint">{zoom.toFixed(1)}×</div>}
             {ready && mode === "video" && !hasMic && (
               <div className="camera-mic-warn">{t("Microphone is off. Allow it for this site to record sound.")}</div>
             )}
+            {!ready && !error && <div className="camera-switching">{t("Switching camera…")}</div>}
           </div>
           <div className="camera-controls">
-            <span className="camera-controls-slot" />
+            <div className="camera-controls-slot">
+              {canFlip && (
+                <button
+                  type="button"
+                  className={`camera-flip ${facing === "user" ? "selfie" : ""}`}
+                  aria-label={t("Switch camera")}
+                  disabled={!ready || recording}
+                  onClick={flipCamera}
+                >
+                  <SwitchCameraIcon size={22} />
+                </button>
+              )}
+            </div>
             {mode === "photo" ? (
               <button type="button" className="camera-shutter" aria-label={t("Take photo")} onClick={snapPhoto} disabled={!ready} />
             ) : recording ? (
@@ -417,15 +500,24 @@ export default function CameraCapture({
             )}
             <div className="camera-controls-slot">
               {canFlip && (
-                <button
-                  type="button"
-                  className="camera-flip"
-                  aria-label={t("Switch camera")}
-                  disabled={!ready || recording}
-                  onClick={flipCamera}
-                >
-                  <SwitchCameraIcon size={22} />
-                </button>
+                <div className="camera-lens-seg" role="group" aria-label={t("Switch camera")}>
+                  <button
+                    type="button"
+                    className={`chip-btn ${facing === "environment" ? "on" : ""}`}
+                    disabled={!ready || recording}
+                    onClick={() => setLens("environment")}
+                  >
+                    {t("Rear")}
+                  </button>
+                  <button
+                    type="button"
+                    className={`chip-btn ${facing === "user" ? "on" : ""}`}
+                    disabled={!ready || recording}
+                    onClick={() => setLens("user")}
+                  >
+                    {t("Selfie")}
+                  </button>
+                </div>
               )}
             </div>
           </div>

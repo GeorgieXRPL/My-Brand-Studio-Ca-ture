@@ -2680,6 +2680,35 @@ select:disabled {
   transform-origin: center center;
   will-change: transform;
 }
+.camera-lens {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 5px 12px;
+  border-radius: var(--r-full);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.camera-switching {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+  background: rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
 .camera-zoom-hint {
   position: absolute;
   left: 50%;
@@ -2737,8 +2766,29 @@ select:disabled {
   justify-content: center;
   padding: 0;
 }
+.camera-flip.selfie {
+  border-color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.22);
+}
 .camera-flip:disabled {
   opacity: 0.4;
+}
+.camera-lens-seg {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+.camera-lens-seg .chip-btn {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.1);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.camera-lens-seg .chip-btn.on {
+  background: #fff;
+  color: #111;
+  border-color: #fff;
 }
 .camera-shutter {
   width: 72px;
